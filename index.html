@@ -2,20 +2,69 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Smart Slip</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Smart Slip">
   <meta name="application-name" content="Smart Slip">
   <meta name="theme-color" content="#0e0e0e">
-  <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/stumped1215/Drag-et-6/refs/heads/main/Smart_slip_icon.jpg.png">
-  <link rel="icon" href="https://raw.githubusercontent.com/stumped1215/Drag-et-6/refs/heads/main/Smart_slip_icon.jpg.png">
+  <!-- Same-folder icons. Do NOT point these at raw.githubusercontent.com. -->
+  <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
+  <link rel="manifest" href="manifest.json">
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: #0e0e0e;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      flex-direction: column;
+      gap: 18px;
+      text-align: center;
+      padding: 24px;
+    }
+    .icon {
+      width: 120px;
+      height: 120px;
+      border-radius: 26px;
+      object-fit: cover;
+      background: #111;
+      box-shadow: 0 8px 30px rgba(201,162,39,.25);
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }
+    .open {
+      color: #000;
+      background: #c9a227;
+      padding: 14px 22px;
+      border-radius: 12px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .hint {
+      font-size: 13px;
+      opacity: .7;
+      max-width: 280px;
+      line-height: 1.4;
+    }
+  </style>
 </head>
-<body style="margin:0;background:#0e0e0e;color:#fff;font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:18px;text-align:center;padding:24px;">
-  <img src="https://raw.githubusercontent.com/stumped1215/Drag-et-6/refs/heads/main/Smart_slip_icon.jpg.png" width="120" height="120" style="border-radius:26px" alt="Smart Slip">
-  <div style="font-size:22px;font-weight:700;">Smart Slip</div>
-  <a href="https://drag-et-6-7nppb5pj9rljq4mw5lbjgc.streamlit.app/" style="color:#000;background:#c9a227;padding:14px 22px;border-radius:12px;font-weight:700;text-decoration:none;">Open app</a>
-  <div style="font-size:13px;opacity:.7;max-width:280px;">Add THIS page to your Home Screen for the gold SS icon. Then tap Open app.</div>
+<body>
+  <img class="icon" src="icon-512.png" width="120" height="120" alt="Smart Slip"
+       onerror="this.onerror=null;this.src='icon-180.png'">
+  <h1>Smart Slip</h1>
+  <a class="open" href="https://drag-et-6-7nppb5pj9rljq4mw5lbjgc.streamlit.app/">Open app</a>
+  <p class="hint">Add THIS page to your Home Screen for the gold SS icon. Then tap Open app.</p>
 </body>
 </html>
