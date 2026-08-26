@@ -38,7 +38,7 @@ except ImportError:
 
 ICON_FILE = "smart_slip_icon.jpg"
 # After uploading the icon to GitHub, paste the RAW file URL here:
-ICON_URL = "https://raw.githubusercontent.com/stumped1215/Drag-et-6/main/smart_slip_icon.png"
+ICON_URL = "https://raw.githubusercontent.com/stumped1215/smart-slip/main/smart_slip_icon.png"
 st.set_page_config(
     page_title="Smart Slip",
     page_icon=ICON_FILE if __import__("os").path.exists(ICON_FILE) else "🏁",
