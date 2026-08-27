@@ -931,7 +931,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.0 • Auto Log • Weather • Predict</p>
+    <p>v2.8.2 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1414,18 +1414,44 @@ if st.session_state.nav == "Log Book":
                 return str(v)
 
         display = sorted(runs, key=lambda r: str(r.get("date") or ""), reverse=True)[:40]
-        st.caption("Shades split your two profiles. Tap a run for weather and notes.")
+        st.caption("Blue and brown split your two cars. Open Details only if you need the rest.")
         for r in display:
             shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#222"))
             if r.get("et") not in [None, ""]:
-                title = f"{when_label(r)}  ·  1/4 {fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}"
+                headline = f"1/4 {fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}"
             else:
-                title = f"{when_label(r)}  ·  1/8 {fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
+                headline = f"1/8 {fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
+            bits = []
+            if r.get("sixty_ft") not in [None, ""]:
+                bits.append(f"60 {fmt(r.get('sixty_ft'), 3)}")
+            if r.get("three_thirty_ft") not in [None, ""]:
+                bits.append(f"330 {fmt(r.get('three_thirty_ft'), 3)}")
+            if r.get("et") not in [None, ""] and r.get("eighth_et") not in [None, ""]:
+                bits.append(f"1/8 {fmt(r.get('eighth_et'), 3)}")
+            if r.get("thousand_et") not in [None, ""]:
+                bits.append(f"1000 {fmt(r.get('thousand_et'), 3)}")
+            wx_bits = []
+            if r.get("temp_f") not in [None, ""]:
+                wx_bits.append(f"{fmt(r.get('temp_f'), 1)}°")
+            if r.get("humidity_pct") not in [None, ""]:
+                wx_bits.append(f"{fmt(r.get('humidity_pct'), 0)}%")
+            if r.get("altimeter_inhg") not in [None, ""]:
+                wx_bits.append(fmt(r.get("altimeter_inhg"), 2))
+            if r.get("density_altitude") not in [None, ""]:
+                wx_bits.append(f"DA {fmt(r.get('density_altitude'), 0)}")
+            car = r.get("vehicle") or ""
             st.markdown(
-                f"<div style='background:{shade};border-radius:12px;padding:2px 8px;margin-bottom:6px;'>",
+                f"""
+<div style="background:{shade};border-radius:14px;padding:12px 14px;margin:0 0 10px 0;">
+  <div style="opacity:.75;font-size:12px;">{when_label(r)}{" · " + car if car else ""}</div>
+  <div style="font-size:22px;font-weight:700;letter-spacing:.02em;margin:4px 0 6px;">{headline}</div>
+  <div style="font-size:14px;">{' · '.join(bits) if bits else ""}</div>
+  <div style="font-size:13px;opacity:.9;margin-top:4px;">{' · '.join(wx_bits) if wx_bits else ""}</div>
+</div>
+""",
                 unsafe_allow_html=True,
             )
-            with st.expander(title):
+            with st.expander("Details"):
                 lines = [
                     ("Dial", r.get("dial"), 3),
                     ("R/T", r.get("reaction_time"), 3),
@@ -1452,7 +1478,6 @@ if st.session_state.nav == "Log Book":
                 )
                 if r.get("notes"):
                     st.write(r.get("notes"))
-            st.markdown("</div>", unsafe_allow_html=True)
 
 # ====================== SETTINGS ======================
 if st.session_state.nav == "Settings":
@@ -1465,6 +1490,7 @@ if st.session_state.nav == "Settings":
     st.caption("You can have 2 active profiles. Delete one to add another.")
     with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
         name = st.text_input("Profile Name", key="prof_name")
+        st.caption("This name cannot be changed later.")
         car_number = st.text_input("Car Number", placeholder="e.g. 1258", key="prof_car_num")
         car_type = st.selectbox("Car Type", ["Dragster", "Door Car"], key="prof_type")
         defaults = DRAGSTER_DEFAULTS if car_type == "Dragster" else DOOR_CAR_DEFAULTS
@@ -1507,7 +1533,7 @@ if st.session_state.nav == "Settings":
         for p in st.session_state.car_profiles:
             with st.expander(f"{p.get('name')} ({p.get('car_type')})"):
                 pid = str(p.get("id"))
-                e_name = st.text_input("Profile Name", value=p.get("name", ""), key=f"edit_name_{pid}")
+                st.write(f"**Name:** {p.get('name')}  \nName cannot be changed.")
                 e_num = st.text_input("Car Number", value=str(p.get("car_number") or ""), key=f"edit_num_{pid}")
                 types = ["Dragster", "Door Car"]
                 e_type = st.selectbox("Car Type", types, index=types.index(p.get("car_type")) if p.get("car_type") in types else 0, key=f"edit_type_{pid}")
@@ -1520,12 +1546,7 @@ if st.session_state.nav == "Settings":
                 e_first = st.number_input("1st Gear Ratio", value=float(p.get("trans_first_gear") or 1.8), step=0.05, format="%.2f", key=f"edit_first_{pid}")
                 e_rear = st.number_input("Rear Gear Ratio", value=float(p.get("rear_gear") or 4.1), step=0.05, format="%.2f", key=f"edit_rear_{pid}")
                 if st.button("Save profile", key=f"save_prof_{pid}"):
-                    new_name = e_name.strip() or p.get("name")
-                    for r in st.session_state.runs:
-                        if str(r.get("profile_id")) == pid:
-                            r["vehicle"] = new_name
                     p.update({
-                        "name": e_name.strip() or p.get("name"),
                         "car_number": e_num.strip(),
                         "car_type": e_type,
                         "fuel_type": e_fuel,
@@ -1597,4 +1618,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.8.0")
+st.caption("Smart Slip v2.8.2")
