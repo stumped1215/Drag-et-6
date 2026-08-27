@@ -543,19 +543,54 @@ def get_gspread_client():
         st.error(f"Google Sheets auth error: {e}")
     return None
 
+RUN_HEADERS = [
+    "id", "user", "date", "time", "track", "vehicle", "profile_id",
+    "dial", "reaction_time", "sixty_ft", "three_thirty_ft", "eighth_et",
+    "eighth_mph", "thousand_et", "et", "trap_mph", "mov",
+    "density_altitude", "temp_f", "altimeter_inhg", "humidity_pct",
+    "water_grains", "air_density_pct", "vapor_pressure", "notes", "excluded"
+]
+
+def _lower_row(r: dict) -> dict:
+    return {str(k).strip().lower(): v for k, v in (r or {}).items()}
+
+def _user_idents():
+    return {
+        str(st.session_state.get("user_email") or "").strip().lower(),
+        str(st.session_state.get("user_name") or "").strip().lower(),
+    } - {""}
+
+def _row_belongs_to_user(r: dict) -> bool:
+    if st.session_state.is_admin:
+        return True
+    ident = _user_idents()
+    u = str(r.get("user") or "").strip().lower()
+    if u and u in ident:
+        return True
+    if u and any(u == i or u.endswith(i) or i in u for i in ident):
+        return True
+    pid = str(r.get("profile_id") or "")
+    if pid:
+        for p in st.session_state.get("car_profiles") or []:
+            if str(p.get("id")) == pid:
+                return True
+    return False
+
 def load_data_from_sheet():
     client = get_gspread_client()
     if client is None:
+        st.session_state.last_sheet_error = "Google Sheets client not connected."
         return False
     try:
         sheet = client.open(SHEET_NAME)
         try:
             ws_runs = sheet.worksheet(WORKSHEET_RUNS)
-            records = ws_runs.get_all_records()
-        except:
-            records = []
+            raw = ws_runs.get_all_records()
+        except Exception:
+            raw = []
         runs = []
-        for r in records:
+        for rec in raw:
+            r = _lower_row(rec)
             for key in ["et", "sixty_ft", "three_thirty_ft", "eighth_et", "eighth_mph",
                         "thousand_et", "trap_mph", "dial", "reaction_time", "mov",
                         "density_altitude", "temp_f", "altimeter_inhg", "humidity_pct",
@@ -565,63 +600,74 @@ def load_data_from_sheet():
                 elif key in r:
                     try:
                         r[key] = float(r[key])
-                    except:
+                    except Exception:
                         pass
             runs.append(r)
-        if not st.session_state.is_admin:
-            ident = [
-                str(st.session_state.get("user_email") or "").lower(),
-                str(st.session_state.get("user_name") or "").lower()
-            ]
-            runs = [r for r in runs if str(r.get("user", "")).lower() in ident]
-        st.session_state.runs = runs
-
+        st.session_state.last_sheet_error = ""
         try:
             ws_profiles = sheet.worksheet(WORKSHEET_PROFILES)
-            profiles = ws_profiles.get_all_records()
-        except:
+            profiles = [_lower_row(p) for p in ws_profiles.get_all_records()]
+        except Exception:
             profiles = []
-        if not st.session_state.is_admin and st.session_state.user_name:
-            ident = [
-                str(st.session_state.get("user_email") or "").lower(),
-                str(st.session_state.get("user_name") or "").lower()
-            ]
-            profiles = [p for p in profiles if str(p.get("user", "")).lower() in ident]
+        if not st.session_state.is_admin:
+            ident = _user_idents()
+            profiles = [p for p in profiles if str(p.get("user") or "").strip().lower() in ident]
         st.session_state.car_profiles = profiles
+        if not st.session_state.is_admin:
+            runs = [r for r in runs if _row_belongs_to_user(r)]
+        st.session_state.runs = runs
         st.session_state.data_loaded = True
         return True
     except Exception as e:
+        st.session_state.last_sheet_error = str(e)
         st.warning(f"Could not load from Google Sheet: {e}")
         return False
+
+def _ensure_runs_ws(sheet):
+    try:
+        ws = sheet.worksheet(WORKSHEET_RUNS)
+    except Exception:
+        ws = sheet.add_worksheet(title=WORKSHEET_RUNS, rows=2000, cols=len(RUN_HEADERS) + 2)
+        ws.update("A1", [RUN_HEADERS])
+        return ws
+    headers = [str(h).strip() for h in ws.row_values(1)]
+    if not headers:
+        ws.update("A1", [RUN_HEADERS])
+        return ws
+    lower = [h.lower() for h in headers]
+    missing = [h for h in RUN_HEADERS if h not in lower]
+    if missing:
+        start = len(headers) + 1
+        for i, h in enumerate(missing):
+            ws.update_cell(1, start + i, h)
+    if ws.row_count < 2000 or ws.col_count < len(RUN_HEADERS) + 2:
+        try:
+            ws.resize(rows=max(ws.row_count, 2000), cols=max(ws.col_count, len(RUN_HEADERS) + 2))
+        except Exception:
+            pass
+    return ws
 
 def save_run_to_sheet(run: dict):
     client = get_gspread_client()
     if client is None:
+        st.session_state.last_sheet_error = "Google Sheets client not connected."
         return False
     try:
         sheet = client.open(SHEET_NAME)
-        try:
-            ws = sheet.worksheet(WORKSHEET_RUNS)
-        except:
-            ws = sheet.add_worksheet(title=WORKSHEET_RUNS, rows=1000, cols=20)
-            headers = ["id", "user", "date", "time", "track", "vehicle", "profile_id",
-                       "dial", "reaction_time", "sixty_ft", "three_thirty_ft", "eighth_et",
-                       "eighth_mph", "thousand_et", "et", "trap_mph", "mov",
-                       "density_altitude", "temp_f", "altimeter_inhg", "humidity_pct",
-                       "water_grains", "air_density_pct", "vapor_pressure", "notes"]
-            ws.append_row(headers)
-        run["user"] = st.session_state.get("user_email") or st.session_state.user_name
-        headers = ws.row_values(1)
-        needed = ["time", "eighth_mph", "thousand_et", "dial", "reaction_time", "mov", "excluded"]
-        missing = [h for h in needed if h not in headers]
-        if missing:
-            for i, h in enumerate(missing):
-                ws.update_cell(1, len(headers) + 1 + i, h)
-            headers = ws.row_values(1)
-        row = [run.get(h, "") if run.get(h) is not None else "" for h in headers]
-        ws.append_row(row)
+        ws = _ensure_runs_ws(sheet)
+        run["user"] = (st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
+        headers = [str(h).strip() for h in ws.row_values(1)]
+        row = []
+        for h in headers:
+            val = run.get(h, run.get(h.lower(), ""))
+            if val is None:
+                val = ""
+            row.append(str(val))
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        st.session_state.last_sheet_error = ""
         return True
     except Exception as e:
+        st.session_state.last_sheet_error = str(e)
         st.error(f"Failed to save run: {e}")
         return False
 
@@ -1012,7 +1058,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.7 • Auto Log • Weather • Predict</p>
+    <p>v2.8.8 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1601,6 +1647,8 @@ if st.session_state.nav == "Settings":
     if st.button("Log out", type="primary"):
         clear_login(cookies)
         st.rerun()
+    if st.session_state.get("last_sheet_error"):
+        st.error(f"Sheet: {st.session_state.last_sheet_error}")
     st.markdown("### Create Car Profile")
     st.caption("You can have 2 active profiles. Delete one to add another.")
     with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
@@ -1744,4 +1792,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.7")
+st.caption("Smart Slip v2.8.8")
