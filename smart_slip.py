@@ -615,8 +615,19 @@ def get_users_ws():
     except Exception:
         ws = sheet.add_worksheet(title=WORKSHEET_USERS, rows=500, cols=12)
         ws.append_row(["email", "display_name", "pw_salt", "pw_hash", "session_token",
-                       "reset_code", "reset_expires", "created_at"])
+                       "device_token", "reset_code", "reset_expires", "created_at"])
         return ws
+
+def _ensure_header(ws, name):
+    headers = ws.row_values(1)
+    if name not in headers:
+        ws.update_cell(1, len(headers) + 1, name)
+        headers.append(name)
+    return headers
+
+def _set_user_cell(ws, idx, name, value):
+    headers = _ensure_header(ws, name)
+    ws.update_cell(idx, headers.index(name) + 1, value)
 
 def find_user(email: str):
     ws = get_users_ws()
@@ -642,10 +653,14 @@ def create_user(email: str, password: str, display_name: str):
     if existing:
         return False, "That email already has an account."
     salt, digest = _hash_pw(password)
-    token = pysecrets.token_urlsafe(24)
+    session = pysecrets.token_urlsafe(24)
+    device = pysecrets.token_urlsafe(24)
     ws.append_row([email, display_name.strip() or email.split("@")[0],
-                   salt, digest, token, "", "", datetime.now().isoformat()])
-    return True, token
+                   salt, digest, session, "", "", datetime.now().isoformat()])
+    _, idx = find_user(email)
+    if idx:
+        _set_user_cell(ws, idx, "device_token", device)
+    return True, device
 
 def login_user(email: str, password: str):
     row, idx = find_user(email)
@@ -653,21 +668,22 @@ def login_user(email: str, password: str):
         return False, None, "No account with that email."
     if not _verify_pw(password, str(row.get("pw_salt", "")), str(row.get("pw_hash", ""))):
         return False, None, "Wrong password."
-    token = pysecrets.token_urlsafe(24)
     ws = get_users_ws()
-    if ws and idx:
-        headers = ws.row_values(1)
-        if "session_token" in headers:
-            ws.update_cell(idx, headers.index("session_token") + 1, token)
-    return True, token, "ok"
+    device = str(row.get("device_token", "")).strip()
+    if not device:
+        device = pysecrets.token_urlsafe(24)
+        if ws and idx:
+            _set_user_cell(ws, idx, "device_token", device)
+    return True, device, "ok"
 
 def user_from_token(email: str, token: str):
     row, _ = find_user(email)
-    if not row:
+    if not row or not token:
         return None
-    saved = str(row.get("session_token", ""))
-    if saved and token and hmac.compare_digest(saved, token):
-        return row
+    for key in ("device_token", "session_token"):
+        saved = str(row.get(key, "")).strip()
+        if saved and hmac.compare_digest(saved, token):
+            return row
     return None
 
 def _secret_val(*names):
@@ -784,29 +800,59 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.1 • Photo • Weather • Predict</p>
+    <p>v2.7.2 • Photo • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 cookies = None
 
+def _restore_from_saved(saved):
+    if not isinstance(saved, str) or "|" not in saved:
+        return False
+    email, token = saved.split("|", 1)
+    row = user_from_token(email, token)
+    if not row:
+        return False
+    st.session_state.user_email = email
+    st.session_state.user_name = row.get("display_name") or email
+    st.session_state.auth_persist = saved
+    return True
+
+if st.session_state.user_name is None:
+    cookie_auth = ""
+    try:
+        cookie_auth = st.context.cookies.get("smartslip_auth", "") or ""
+    except Exception:
+        cookie_auth = ""
+    if _restore_from_saved(cookie_auth):
+        st.rerun()
+
 if JS_AVAILABLE:
+    persist_js = """
+    (function(){
+      const v = %s;
+      localStorage.setItem('smartslip_auth', v);
+      document.cookie = 'smartslip_auth=' + encodeURIComponent(v) + '; max-age=2592000; path=/; SameSite=Lax';
+      return v;
+    })();
+    """
+    clear_js = """
+    (function(){
+      localStorage.removeItem('smartslip_auth');
+      document.cookie = 'smartslip_auth=; max-age=0; path=/';
+      return '';
+    })();
+    """
     if st.session_state.get("auth_clear"):
-        st_javascript("localStorage.removeItem('smartslip_auth');")
+        st_javascript(clear_js)
         st.session_state.auth_clear = False
     elif st.session_state.get("auth_persist"):
-        st_javascript(f"localStorage.setItem('smartslip_auth', {st.session_state.auth_persist!r});")
+        st_javascript(persist_js % repr(st.session_state.auth_persist))
     elif st.session_state.user_name is None:
-        saved = st_javascript("localStorage.getItem('smartslip_auth');")
-        if isinstance(saved, str) and "|" in saved:
-            email, token = saved.split("|", 1)
-            row = user_from_token(email, token)
-            if row:
-                st.session_state.user_email = email
-                st.session_state.user_name = row.get("display_name") or email
-                st.session_state.auth_persist = saved
-                st.rerun()
+        saved = st_javascript("localStorage.getItem('smartslip_auth') || '';")
+        if _restore_from_saved(saved):
+            st.rerun()
 
 # ---------- User / Admin Login ----------
 if st.session_state.user_name is None:
@@ -1324,4 +1370,4 @@ Also add `extra-streamlit-components` to requirements.txt so login stays saved o
                 st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.1")
+st.caption("Smart Slip v2.7.2")
