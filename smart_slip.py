@@ -996,7 +996,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.5 • Auto Log • Weather • Predict</p>
+    <p>v2.8.6 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1473,6 +1473,10 @@ if st.session_state.nav == "Log Book":
                 return f"{d} {t}".strip()
             return d or "—"
 
+        def time_only(r):
+            t = str(r.get("time") or "").strip()
+            return t if t else "—"
+
         def fmt(v, digits=None):
             if v in [None, ""]:
                 return "—"
@@ -1512,16 +1516,21 @@ if st.session_state.nav == "Log Book":
                 rows_html = []
                 for r in day_runs:
                     shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#1a1a1a"))
-                    finish = f"{fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}" if r.get("et") not in [None, ""] else f"{fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
-                    mark = " · off" if str(r.get("excluded") or "").lower() in ["yes", "true", "1"] else ""
+                    eighth = "—"
+                    if r.get("eighth_et") not in [None, ""]:
+                        eighth = f"{fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
+                    quarter = "—"
+                    if r.get("et") not in [None, ""]:
+                        quarter = f"{fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}"
+                    mark = " *" if str(r.get("excluded") or "").lower() in ["yes", "true", "1"] else ""
                     rows_html.append(
                         "<tr style='background:" + shade + ";'>"
-                        f"<td>{when_label(r)}{mark}</td>"
+                        f"<td>{time_only(r)}{mark}</td>"
                         f"<td>{fmt(r.get('sixty_ft'), 3)}</td>"
                         f"<td>{fmt(r.get('three_thirty_ft'), 3)}</td>"
-                        f"<td>{fmt(r.get('eighth_et'), 3)}</td>"
+                        f"<td>{eighth}</td>"
                         f"<td>{fmt(r.get('thousand_et'), 3)}</td>"
-                        f"<td>{finish}</td>"
+                        f"<td>{quarter}</td>"
                         f"<td>{fmt(r.get('density_altitude'), 0)}</td>"
                         "</tr>"
                     )
@@ -1534,34 +1543,33 @@ if st.session_state.nav == "Log Book":
 .ss-wrap { overflow-x:auto; border-radius:12px; }
 </style>
 <div class="ss-wrap"><table class="ss-grid">
-<tr><th>When</th><th>60'</th><th>330'</th><th>1/8</th><th>1000'</th><th>Finish</th><th>DA</th></tr>
+<tr><th>Time</th><th>60'</th><th>330'</th><th>1/8</th><th>1000'</th><th>1/4</th><th>DA</th></tr>
 """ + "".join(rows_html) + "</table></div>",
                     unsafe_allow_html=True,
                 )
-                options = {str(r.get("id")): when_label(r) for r in day_runs}
-                picked = st.radio("Open a run", list(options.keys()), format_func=lambda i: options.get(i, i), key=f"open_{day}")
+                options = [" "] + [str(r.get("id")) for r in day_runs]
+                labels_map = {str(r.get("id")): time_only(r) for r in day_runs}
+                picked = st.selectbox(
+                    "Open a run",
+                    options,
+                    format_func=lambda i: labels_map.get(i, "Select time"),
+                    key=f"open_{day}",
+                )
                 r = next((x for x in day_runs if str(x.get("id")) == str(picked)), None)
                 if r:
-                    lines = [
-                        ("Dial", r.get("dial"), 3),
-                        ("R/T", r.get("reaction_time"), 3),
-                        ("60'", r.get("sixty_ft"), 3),
-                        ("330'", r.get("three_thirty_ft"), 3),
-                        ("1/8 ET", r.get("eighth_et"), 3),
-                        ("1/8 MPH", r.get("eighth_mph"), 1),
-                        ("1000'", r.get("thousand_et"), 3),
-                        ("1/4 ET", r.get("et"), 3),
-                        ("1/4 MPH", r.get("trap_mph"), 1),
-                        ("MOV", r.get("mov"), 3),
-                    ]
-                    shown = [f"**{lab}:** {fmt(val, dig)}" for lab, val, dig in lines if val not in [None, ""]]
-                    if shown:
-                        st.markdown("  \n".join(shown))
+                    extra = []
+                    if r.get("dial") not in [None, ""]:
+                        extra.append(f"Dial {fmt(r.get('dial'), 3)}")
+                    if r.get("reaction_time") not in [None, ""]:
+                        extra.append(f"R/T {fmt(r.get('reaction_time'), 3)}")
+                    if r.get("mov") not in [None, ""]:
+                        extra.append(f"MOV {fmt(r.get('mov'), 3)}")
+                    if extra:
+                        st.caption(" · ".join(extra))
                     st.write(
                         f"Temp {fmt(r.get('temp_f'), 1)}°F · "
                         f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
                         f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
-                        f"DA {fmt(r.get('density_altitude'), 0)} · "
                         f"Grains {fmt(r.get('water_grains'), 1)} · "
                         f"Air {fmt(r.get('air_density_pct'), 2)}% · "
                         f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
@@ -1571,7 +1579,7 @@ if st.session_state.nav == "Log Book":
                         st.write(note)
                     excluded = str(r.get("excluded") or "").lower() in ["yes", "true", "1"]
                     if excluded:
-                        st.caption("This run is excluded from predictions.")
+                        st.caption("Excluded from predictions.")
                     cdel, cexc = st.columns(2)
                     with cexc:
                         label = "Include in predictions" if excluded else "Exclude from predictions"
@@ -1592,17 +1600,6 @@ if st.session_state.nav == "Settings":
     if st.button("Log out", type="primary"):
         clear_login(cookies)
         st.rerun()
-    st.markdown("### Report a bug")
-    bug = st.text_area("What happened?", placeholder="Paste the red error and what you tapped.", key="bug_text")
-    if st.button("Send report", key="bug_send"):
-        if not str(bug or "").strip():
-            st.error("Type what went wrong first.")
-        else:
-            ok, msg = save_bug_report(bug)
-            if ok:
-                st.success("Report saved. I’ll see it on the Bugs tab in SmartSlipData.")
-            else:
-                st.error(f"Could not send report: {msg}")
     st.markdown("### Create Car Profile")
     st.caption("You can have 2 active profiles. Delete one to add another.")
     with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
@@ -1733,5 +1730,17 @@ SMTP_FROM = "you@gmail.com"
                 except Exception as e:
                     st.error(f"Sheet error: {e}")
 
+    st.markdown("### Report a bug")
+    bug = st.text_area("What happened?", placeholder="Paste the red error and what you tapped.", key="bug_text")
+    if st.button("Send report", key="bug_send"):
+        if not str(bug or "").strip():
+            st.error("Type what went wrong first.")
+        else:
+            ok, msg = save_bug_report(bug)
+            if ok:
+                st.success("Report saved.")
+            else:
+                st.error(f"Could not send report: {msg}")
+
 st.divider()
-st.caption("Smart Slip v2.8.5")
+st.caption("Smart Slip v2.8.6")
