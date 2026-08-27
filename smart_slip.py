@@ -800,7 +800,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.2 • Photo • Weather • Predict</p>
+    <p>v2.7.3 • Photo • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -952,6 +952,8 @@ st.session_state.nav = st.radio(
     label_visibility="collapsed",
     key="nav_radio",
 )
+
+user_profiles = st.session_state.get("car_profiles") or []
 
 # ====================== PHOTO IMPORT (NEW) ======================
 if st.session_state.nav == "Photo":
@@ -1370,4 +1372,4 @@ Also add `extra-streamlit-components` to requirements.txt so login stays saved o
                 st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.2")
+st.caption("Smart Slip v2.7.3")
