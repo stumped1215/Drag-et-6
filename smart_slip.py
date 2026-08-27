@@ -160,7 +160,11 @@ st.markdown("""
 
 # ====================== CONFIG ======================
 ADMIN_PASSWORD = "admin123"
+ADMIN_EMAILS = ["stumped1215@gmail.com"]
 SHEET_NAME = "SmartSlipData"
+
+def email_is_admin(email: str) -> bool:
+    return str(email or "").strip().lower() in ADMIN_EMAILS
 WORKSHEET_RUNS = "Runs"
 WORKSHEET_PROFILES = "Profiles"
 WORKSHEET_USERS = "Users"
@@ -589,6 +593,57 @@ def save_profile_to_sheet(profile: dict):
         st.error(f"Failed to save profile: {e}")
         return False
 
+def delete_profile_and_runs(profile: dict):
+    pid = str(profile.get("id", ""))
+    pname = str(profile.get("name", ""))
+    ident = [
+        str(st.session_state.get("user_email") or "").lower(),
+        str(st.session_state.get("user_name") or "").lower(),
+    ]
+    st.session_state.car_profiles = [
+        p for p in st.session_state.car_profiles if str(p.get("id")) != pid
+    ]
+    st.session_state.runs = [
+        r for r in st.session_state.runs
+        if not (
+            str(r.get("profile_id", "")) == pid
+            or str(r.get("vehicle", "")) == pname
+        )
+    ]
+    client = get_gspread_client()
+    if client is None:
+        return True
+    try:
+        sheet = client.open(SHEET_NAME)
+        try:
+            ws = sheet.worksheet(WORKSHEET_PROFILES)
+            records = ws.get_all_records()
+            drop = []
+            for i, row in enumerate(records, start=2):
+                if str(row.get("id")) == pid:
+                    drop.append(i)
+            for i in reversed(drop):
+                ws.delete_rows(i, i)
+        except Exception:
+            pass
+        try:
+            ws = sheet.worksheet(WORKSHEET_RUNS)
+            records = ws.get_all_records()
+            drop = []
+            for i, row in enumerate(records, start=2):
+                same_user = str(row.get("user", "")).lower() in ident or st.session_state.is_admin
+                same_prof = str(row.get("profile_id", "")) == pid or str(row.get("vehicle", "")) == pname
+                if same_user and same_prof:
+                    drop.append(i)
+            for i in reversed(drop):
+                ws.delete_rows(i, i)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        st.error(f"Could not delete from Google Sheet: {e}")
+        return False
+
 # ====================== AUTH ======================
 def _hash_pw(password: str, salt: str = None):
     salt = salt or pysecrets.token_hex(16)
@@ -773,8 +828,10 @@ def complete_password_reset(email: str, code: str, new_password: str):
     return True, token
 
 def set_logged_in(email, token, display_name, cookies=None):
+    email = (email or "").strip().lower()
     st.session_state.user_email = email
     st.session_state.user_name = display_name or email
+    st.session_state.is_admin = email_is_admin(email)
     st.session_state.data_loaded = False
     st.session_state.auth_persist = f"{email}|{token}"
 
@@ -800,7 +857,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.3 • Photo • Weather • Predict</p>
+    <p>v2.7.5 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -814,8 +871,9 @@ def _restore_from_saved(saved):
     row = user_from_token(email, token)
     if not row:
         return False
-    st.session_state.user_email = email
+    st.session_state.user_email = email.strip().lower()
     st.session_state.user_name = row.get("display_name") or email
+    st.session_state.is_admin = email_is_admin(email)
     st.session_state.auth_persist = saved
     return True
 
@@ -857,7 +915,7 @@ if JS_AVAILABLE:
 # ---------- User / Admin Login ----------
 if st.session_state.user_name is None:
     st.subheader("Sign in to Smart Slip")
-    mode = st.radio("Account", ["Log in", "Create account", "Reset password", "Admin"], horizontal=True)
+    mode = st.radio("Account", ["Log in", "Create account", "Reset password"], horizontal=True)
 
     if mode == "Log in":
         email = st.text_input("Email", key="login_email")
@@ -911,21 +969,19 @@ if st.session_state.user_name is None:
             else:
                 st.error(msg)
 
-    else:
-        admin_pw = st.text_input("Admin password", type="password", key="admin_pw")
-        if st.button("Admin Login", use_container_width=True):
-            if admin_pw == _admin_password():
-                st.session_state.is_admin = True
-                st.session_state.user_name = "ADMIN"
-                st.session_state.user_email = "admin"
-                st.rerun()
-            else:
-                st.error("Wrong password")
     st.stop()
 
 if not st.session_state.data_loaded:
     with st.spinner("🔥 Warming up the tires..."):
         load_data_from_sheet()
+
+u1, u2 = st.columns([3, 1])
+with u1:
+    st.caption(st.session_state.user_name + (" · Admin" if st.session_state.is_admin else ""))
+with u2:
+    if st.button("Log out", use_container_width=True):
+        clear_login(cookies)
+        st.rerun()
 
 with st.sidebar:
     st.write(f"**User:** {st.session_state.user_name}")
@@ -937,13 +993,10 @@ with st.sidebar:
     if st.button("Refresh Data"):
         st.session_state.data_loaded = False
         st.rerun()
-    if st.button("Log out"):
-        clear_login(cookies)
-        st.rerun()
 
-labels = ["Photo", "Log", "Predict", "History", "Settings"]
-if "nav" not in st.session_state:
-    st.session_state.nav = "Photo"
+labels = ["Auto Log", "Manual Log", "Predict", "History", "Settings"]
+if "nav" not in st.session_state or st.session_state.nav in ["Photo", "Log"]:
+    st.session_state.nav = "Auto Log"
 st.session_state.nav = st.radio(
     "Section",
     labels,
@@ -956,8 +1009,8 @@ st.session_state.nav = st.radio(
 user_profiles = st.session_state.get("car_profiles") or []
 
 # ====================== PHOTO IMPORT (NEW) ======================
-if st.session_state.nav == "Photo":
-    st.subheader("Upload Timeslip Photo")
+if st.session_state.nav == "Auto Log":
+    st.subheader("Auto Log")
     st.write("Take a clear photo of your timeslip. Grok will extract the data automatically.")
 
     car_number = st.text_input("Car Number on the slip", placeholder="e.g. 1258", key="photo_car_num")
@@ -1082,7 +1135,7 @@ notes=
                         st.rerun()
 
 # ====================== MANUAL LOG ======================
-if st.session_state.nav == "Log":
+if st.session_state.nav == "Manual Log":
     st.subheader("Manual Log")
     if user_profiles:
         profile_options = {str(p["id"]): p["name"] for p in user_profiles}
@@ -1275,12 +1328,16 @@ if st.session_state.nav == "History":
 # ====================== SETTINGS ======================
 if st.session_state.nav == "Settings":
     st.subheader("Settings & Car Profiles")
+    st.write(f"Signed in as **{st.session_state.user_name}**")
+    if st.button("Log out", type="primary"):
+        clear_login(cookies)
+        st.rerun()
     st.markdown("### Create Car Profile")
-    with st.expander("New Profile", expanded=True):
+    st.caption("You can have 2 active profiles. Delete one to add another.")
+    with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
         name = st.text_input("Profile Name", key="prof_name")
         car_type = st.selectbox("Car Type", ["Dragster", "Door Car"], key="prof_type")
         defaults = DRAGSTER_DEFAULTS if car_type == "Dragster" else DOOR_CAR_DEFAULTS
-        st.caption(f"Defaults for {car_type}: {defaults['weight']} lbs • {defaults['tire_size']} • {defaults['fuel_type']} • 1st {defaults['trans_first_gear']} • Rear {defaults['rear_gear']}")
         fuel = st.selectbox("Fuel Type", ["Gas", "E85", "Alcohol"],
                             index=["Gas", "E85", "Alcohol"].index(defaults["fuel_type"]), key=f"prof_fuel_{car_type}")
         weight = st.number_input("Weight (lbs)", value=defaults["weight"], step=50, key=f"prof_weight_{car_type}")
@@ -1290,7 +1347,9 @@ if st.session_state.nav == "Settings":
         first_gear = st.number_input("1st Gear Ratio", value=defaults["trans_first_gear"], step=0.05, format="%.2f", key=f"prof_first_{car_type}")
         rear_gear = st.number_input("Rear Gear Ratio", value=defaults["rear_gear"], step=0.05, format="%.2f", key=f"prof_rear_{car_type}")
         if st.button("Create Profile", key="create_prof"):
-            if name.strip():
+            if len(st.session_state.car_profiles) >= 2:
+                st.error("You can only have 2 active profiles. Delete one first if you need a new one.")
+            elif name.strip():
                 profile = {
                     "id": str(datetime.now().timestamp()),
                     "user": st.session_state.user_name,
@@ -1319,10 +1378,22 @@ if st.session_state.nav == "Settings":
                 st.write(f"Fuel: {p.get('fuel_type')} | Weight: {p.get('weight')} lbs")
                 st.write(f"Tire: {p.get('tire_size')} {p.get('tire_type')}")
                 st.write(f"1st: {p.get('trans_first_gear')} | Rear: {p.get('rear_gear')}")
+                warn = st.checkbox(
+                    f"I understand deleting {p.get('name')} will erase all stored runs for this profile",
+                    key=f"del_ok_{p.get('id')}"
+                )
+                if st.button("Delete this profile", key=f"del_{p.get('id')}"):
+                    if not warn:
+                        st.error("Check the box to confirm you will lose all stored data for this profile.")
+                    else:
+                        delete_profile_and_runs(p)
+                        st.success(f"Deleted {p.get('name')} and its runs.")
+                        st.rerun()
 
-    st.divider()
-    st.markdown("### API Keys")
-    st.markdown("""
+    if st.session_state.is_admin:
+        st.divider()
+        st.markdown("### API Keys")
+        st.markdown("""
 **Required in Streamlit Secrets:**
 
 ```toml
@@ -1330,7 +1401,6 @@ if st.session_state.nav == "Settings":
 # ... your Google service account ...
 
 XAI_API_KEY = "xai-your-key-here"
-ADMIN_PASSWORD = "change-me"
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -1338,38 +1408,33 @@ SMTP_USER = "you@gmail.com"
 SMTP_PASSWORD = "your-app-password"
 SMTP_FROM = "you@gmail.com"
 ```
-
-Also add `extra-streamlit-components` to requirements.txt so login stays saved on the phone.
 """)
-    # Debug: show what top-level keys exist in secrets (not values)
-    try:
-        secret_keys = list(st.secrets.keys())
-        st.write("**Top-level keys found in Secrets:**", secret_keys)
-    except Exception as e:
-        st.write("Could not list secrets:", e)
+        try:
+            secret_keys = list(st.secrets.keys())
+            st.write("**Top-level keys found in Secrets:**", secret_keys)
+        except Exception as e:
+            st.write("Could not list secrets:", e)
 
-    if get_xai_client():
-        st.success("Grok API key detected and loaded.")
-    else:
-        st.warning("Grok API key not found in Secrets.")
-        st.info("Make sure the line `XAI_API_KEY = \"xai-...\"` is **outside** the [gcp_service_account] section, then Save + Reboot.")
-
-    st.markdown("### Google Sheets Status")
-    if not GSPREAD_AVAILABLE:
-        st.error("`gspread` or `google-auth` missing from requirements.txt")
-    else:
-        if "gcp_service_account" not in st.secrets:
-            st.error("No [gcp_service_account] in Secrets")
+        if get_xai_client():
+            st.success("Grok API key detected and loaded.")
         else:
-            try:
-                client = get_gspread_client()
-                if client:
-                    sheet = client.open(SHEET_NAME)
-                    st.success(f"Google Sheets connected: **{SHEET_NAME}**")
-                else:
-                    st.error("Client creation failed")
-            except Exception as e:
-                st.error(f"Sheet error: {e}")
+            st.warning("Grok API key not found in Secrets.")
+
+        st.markdown("### Google Sheets Status")
+        if not GSPREAD_AVAILABLE:
+            st.error("`gspread` or `google-auth` missing from requirements.txt")
+        else:
+            if "gcp_service_account" not in st.secrets:
+                st.error("No [gcp_service_account] in Secrets")
+            else:
+                try:
+                    client = get_gspread_client()
+                    if client:
+                        st.success(f"Google Sheets connected: **{SHEET_NAME}**")
+                    else:
+                        st.error("Client creation failed")
+                except Exception as e:
+                    st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.3")
+st.caption("Smart Slip v2.7.5")
