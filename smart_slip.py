@@ -118,7 +118,7 @@ st.markdown("""
     gap: 0.15rem !important;
   }
   [data-testid="stRadio"] label {
-    font-size: 12px !important;
+    font-size: 11px !important;
     white-space: nowrap !important;
     padding-right: 4px !important;
   }
@@ -628,11 +628,14 @@ def save_profile_to_sheet(profile: dict):
             ws = sheet.worksheet(WORKSHEET_PROFILES)
         except:
             ws = sheet.add_worksheet(title=WORKSHEET_PROFILES, rows=200, cols=15)
-            headers = ["id", "user", "name", "car_type", "fuel_type", "weight",
+            headers = ["id", "user", "name", "car_number", "car_type", "fuel_type", "weight",
                        "tire_size", "tire_type", "trans_first_gear", "rear_gear"]
             ws.append_row(headers)
         profile["user"] = st.session_state.get("user_email") or st.session_state.user_name
         headers = ws.row_values(1)
+        if "car_number" not in headers:
+            ws.update_cell(1, len(headers) + 1, "car_number")
+            headers = ws.row_values(1)
         row = [profile.get(h, "") for h in headers]
         ws.append_row(row)
         return True
@@ -904,7 +907,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.8 • Auto Log • Weather • Predict</p>
+    <p>v2.7.9 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1033,9 +1036,11 @@ with st.sidebar:
         st.session_state.data_loaded = False
         st.rerun()
 
-labels = ["Auto Log", "Manual Log", "Predict", "History", "Settings"]
-if "nav" not in st.session_state or st.session_state.nav in ["Photo", "Log"]:
-    st.session_state.nav = "Auto Log"
+labels = ["Auto Log", "Manual Log", "Predict", "Log Book", "Settings"]
+if "nav" not in st.session_state or st.session_state.nav in ["Photo", "Log", "History"]:
+    st.session_state.nav = "Auto Log" if st.session_state.get("nav") in [None, "Photo", "Log", "History"] else st.session_state.nav
+if st.session_state.nav == "History":
+    st.session_state.nav = "Log Book"
 st.session_state.nav = st.radio(
     "Section",
     labels,
@@ -1052,22 +1057,33 @@ if st.session_state.nav == "Auto Log":
     st.subheader("Auto Log")
     st.write("Take a clear photo of your timeslip. Grok will extract the data automatically.")
 
-    car_number = st.text_input("Car Number on the slip", placeholder="e.g. 1258", key="photo_car_num")
-    uploaded = st.file_uploader("Upload timeslip photo", type=["jpg", "jpeg", "png"], key="photo_upload")
-
     user_profiles = st.session_state.car_profiles
     if user_profiles:
         profile_options = {str(p["id"]): p["name"] for p in user_profiles}
         selected_profile_id = st.selectbox("Select Car Profile", options=list(profile_options.keys()),
                                            format_func=lambda x: profile_options[x], key="photo_profile")
+        selected_profile = get_profile_by_id(selected_profile_id) or {}
+        default_num = str(selected_profile.get("car_number") or "")
     else:
         selected_profile_id = None
+        selected_profile = {}
+        default_num = ""
         st.warning("Create a Car Profile in Settings first.")
+
+    car_number = st.text_input(
+        "Car Number on the slip",
+        value=default_num,
+        placeholder="e.g. 1258",
+        key=f"photo_car_num_{selected_profile_id or 'none'}"
+    )
+    uploaded = st.file_uploader("Upload timeslip photo", type=["jpg", "jpeg", "png"], key="photo_upload")
 
     notes = st.text_area("Additional Notes (spin / lift / brakes)", height=70, key="photo_notes")
 
     if st.button("Extract with Grok", type="primary", use_container_width=True):
-        if not uploaded:
+        if not str(car_number or "").strip():
+            st.error("Enter the car number before Grok can read the slip.")
+        elif not uploaded:
             st.error("Please upload a photo first.")
         elif not get_xai_client():
             st.error("Grok API not configured. Add `XAI_API_KEY` to Streamlit Secrets.")
@@ -1158,7 +1174,7 @@ notes=
                             "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
                             "time": data.get("time", ""),
                             "track": data.get("track", "Unknown"),
-                            "vehicle": data.get("vehicle", profile_name or car_number or "Main Car"),
+                            "vehicle": profile_name or "Main Car",
                             "profile_id": selected_profile_id,
                             "dial": data.get("dial"),
                             "reaction_time": data.get("reaction_time"),
@@ -1200,7 +1216,6 @@ if st.session_state.nav == "Manual Log":
         selected_profile_id = None
         vehicle_name = "Main Car"
         st.warning("Create a Car Profile in Settings first.")
-    st.write(f"**Vehicle:** {vehicle_name}")
     track = st.text_input("Track", key="manual_track")
     st.markdown("**Weather**")
     c1, c2, c3 = st.columns(3)
@@ -1342,8 +1357,8 @@ if st.session_state.nav == "Predict":
             st.write(st.session_state.grok_prediction)
 
 # ====================== HISTORY ======================
-if st.session_state.nav == "History":
-    st.subheader("History")
+if st.session_state.nav == "Log Book":
+    st.subheader("Log Book")
     runs = list(st.session_state.runs or [])
     if not runs:
         st.info("No runs found yet.")
@@ -1426,6 +1441,7 @@ if st.session_state.nav == "Settings":
     st.caption("You can have 2 active profiles. Delete one to add another.")
     with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
         name = st.text_input("Profile Name", key="prof_name")
+        car_number = st.text_input("Car Number", placeholder="e.g. 1258", key="prof_car_num")
         car_type = st.selectbox("Car Type", ["Dragster", "Door Car"], key="prof_type")
         defaults = DRAGSTER_DEFAULTS if car_type == "Dragster" else DOOR_CAR_DEFAULTS
         fuel = st.selectbox("Fuel Type", ["Gas", "E85", "Alcohol"],
@@ -1444,6 +1460,7 @@ if st.session_state.nav == "Settings":
                     "id": str(datetime.now().timestamp()),
                     "user": st.session_state.user_name,
                     "name": name.strip(),
+                    "car_number": car_number.strip(),
                     "car_type": car_type,
                     "fuel_type": fuel,
                     "weight": weight,
@@ -1465,6 +1482,8 @@ if st.session_state.nav == "Settings":
         st.markdown("### Your Profiles")
         for p in st.session_state.car_profiles:
             with st.expander(f"{p.get('name')} ({p.get('car_type')})"):
+                if p.get("car_number"):
+                    st.write(f"Car # {p.get('car_number')}")
                 st.write(f"Fuel: {p.get('fuel_type')} | Weight: {p.get('weight')} lbs")
                 st.write(f"Tire: {p.get('tire_size')} {p.get('tire_type')}")
                 st.write(f"1st: {p.get('trans_first_gear')} | Rear: {p.get('rear_gear')}")
@@ -1527,4 +1546,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.8")
+st.caption("Smart Slip v2.7.9")
