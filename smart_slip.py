@@ -21,6 +21,13 @@ except ImportError:
     COOKIE_AVAILABLE = False
     CookieManager = None
 
+try:
+    from streamlit_javascript import st_javascript
+    JS_AVAILABLE = True
+except ImportError:
+    JS_AVAILABLE = False
+    st_javascript = None
+
 # Optional Google Sheets support
 try:
     import gspread
@@ -777,59 +784,29 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.0 • Photo • Weather • Predict</p>
+    <p>v2.7.1 • Photo • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 cookies = None
 
-# Restore login from ?ss_auth= then from the phone's localStorage
-if st.session_state.user_name is None:
-    raw = ""
-    try:
-        raw = st.query_params.get("ss_auth", "")
-        if isinstance(raw, list):
-            raw = raw[0] if raw else ""
-    except Exception:
-        raw = ""
-    if raw and "|" in str(raw):
-        email, token = str(raw).split("|", 1)
-        row = user_from_token(email, token)
-        if row:
-            st.session_state.user_email = email
-            st.session_state.user_name = row.get("display_name") or email
-            st.session_state.auth_persist = f"{email}|{token}"
-    else:
-        st.markdown("""
-<script>
-(function() {
-  try {
-    const v = localStorage.getItem('smartslip_auth');
-    const params = new URLSearchParams(window.location.search);
-    if (v && v.indexOf('|') !== -1 && !params.get('ss_auth')) {
-      params.set('ss_auth', v);
-      window.location.replace(window.location.pathname + '?' + params.toString());
-    }
-  } catch (e) {}
-})();
-</script>
-""", unsafe_allow_html=True)
-
-if st.session_state.get("auth_persist"):
-    val = st.session_state.auth_persist
-    st.markdown(f"""
-<script>
-try {{ localStorage.setItem('smartslip_auth', {val!r}); }} catch (e) {{}}
-</script>
-""", unsafe_allow_html=True)
-if st.session_state.get("auth_clear"):
-    st.markdown("""
-<script>
-try { localStorage.removeItem('smartslip_auth'); } catch (e) {}
-</script>
-""", unsafe_allow_html=True)
-    st.session_state.auth_clear = False
+if JS_AVAILABLE:
+    if st.session_state.get("auth_clear"):
+        st_javascript("localStorage.removeItem('smartslip_auth');")
+        st.session_state.auth_clear = False
+    elif st.session_state.get("auth_persist"):
+        st_javascript(f"localStorage.setItem('smartslip_auth', {st.session_state.auth_persist!r});")
+    elif st.session_state.user_name is None:
+        saved = st_javascript("localStorage.getItem('smartslip_auth');")
+        if isinstance(saved, str) and "|" in saved:
+            email, token = saved.split("|", 1)
+            row = user_from_token(email, token)
+            if row:
+                st.session_state.user_email = email
+                st.session_state.user_name = row.get("display_name") or email
+                st.session_state.auth_persist = saved
+                st.rerun()
 
 # ---------- User / Admin Login ----------
 if st.session_state.user_name is None:
@@ -1347,4 +1324,4 @@ Also add `extra-streamlit-components` to requirements.txt so login stays saved o
                 st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.0")
+st.caption("Smart Slip v2.7.1")
