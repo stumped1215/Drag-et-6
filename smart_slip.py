@@ -122,15 +122,21 @@ st.markdown("""
     white-space: nowrap !important;
     padding-right: 4px !important;
   }
+  div[data-baseweb="select"] > div,
+  [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+    background: #ececec !important;
+    color: #111 !important;
+  }
   div[data-baseweb="popover"],
-  ul[role="listbox"] {
-    background: #f3f3f3 !important;
+  ul[role="listbox"],
+  div[data-baseweb="menu"] {
+    background: #f6f6f6 !important;
     color: #111 !important;
   }
   li[role="option"],
   div[data-baseweb="option"] {
     color: #111 !important;
-    background: #f3f3f3 !important;
+    background: #f6f6f6 !important;
   }
   li[role="option"]:hover,
   li[role="option"][aria-selected="true"],
@@ -605,7 +611,7 @@ def save_run_to_sheet(run: dict):
             ws.append_row(headers)
         run["user"] = st.session_state.get("user_email") or st.session_state.user_name
         headers = ws.row_values(1)
-        needed = ["time", "eighth_mph", "thousand_et", "dial", "reaction_time", "mov"]
+        needed = ["time", "eighth_mph", "thousand_et", "dial", "reaction_time", "mov", "excluded"]
         missing = [h for h in needed if h not in headers]
         if missing:
             for i, h in enumerate(missing):
@@ -616,6 +622,43 @@ def save_run_to_sheet(run: dict):
         return True
     except Exception as e:
         st.error(f"Failed to save run: {e}")
+        return False
+
+def _run_row_index(ws, run_id):
+    records = ws.get_all_records()
+    for i, row in enumerate(records, start=2):
+        if str(row.get("id")) == str(run_id):
+            return i, row
+    return None, None
+
+def delete_run_from_sheet(run_id):
+    client = get_gspread_client()
+    if client is None:
+        return False
+    try:
+        ws = client.open(SHEET_NAME).worksheet(WORKSHEET_RUNS)
+        idx, _ = _run_row_index(ws, run_id)
+        if idx:
+            ws.delete_rows(idx, idx)
+        return True
+    except Exception:
+        return False
+
+def set_run_excluded(run_id, excluded: bool):
+    client = get_gspread_client()
+    if client is None:
+        return False
+    try:
+        ws = client.open(SHEET_NAME).worksheet(WORKSHEET_RUNS)
+        headers = ws.row_values(1)
+        if "excluded" not in headers:
+            ws.update_cell(1, len(headers) + 1, "excluded")
+            headers = ws.row_values(1)
+        idx, _ = _run_row_index(ws, run_id)
+        if idx and "excluded" in headers:
+            ws.update_cell(idx, headers.index("excluded") + 1, "yes" if excluded else "")
+        return True
+    except Exception:
         return False
 
 def save_profile_to_sheet(profile: dict):
@@ -931,7 +974,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.3 • Auto Log • Weather • Predict</p>
+    <p>v2.8.4 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1316,7 +1359,11 @@ if st.session_state.nav == "Predict":
         st.info("No runs yet for your account.")
     else:
         selected_vehicle = st.selectbox("Select Vehicle", all_vehicles, key="pred_vehicle")
-        vehicle_runs = [r for r in st.session_state.runs if r.get("vehicle") == selected_vehicle]
+        vehicle_runs = [
+            r for r in st.session_state.runs
+            if r.get("vehicle") == selected_vehicle
+            and str(r.get("excluded") or "").lower() not in ["yes", "true", "1"]
+        ]
         pred_track = st.selectbox("Drag Strip", list(TRACKS.keys()), key="pred_track")
         pred_info = TRACKS.get(pred_track, TRACKS["Other / Custom"])
         st.markdown("**Current Weather**")
@@ -1413,30 +1460,51 @@ if st.session_state.nav == "Log Book":
             except Exception:
                 return str(v)
 
-        display = sorted(runs, key=lambda r: str(r.get("date") or ""), reverse=True)[:40]
-
         def clean_notes(n):
             parts = [p.strip() for p in str(n or "").split("|")]
             keep = [p for p in parts if p and not p.lower().startswith("wx:")]
             return " | ".join(keep)
 
-        rows_html = []
-        for r in display:
-            shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#1a1a1a"))
-            finish = f"{fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}" if r.get("et") not in [None, ""] else f"{fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
-            rows_html.append(
-                "<tr style='background:" + shade + ";'>"
-                f"<td>{when_label(r)}</td>"
-                f"<td>{fmt(r.get('sixty_ft'), 3)}</td>"
-                f"<td>{fmt(r.get('three_thirty_ft'), 3)}</td>"
-                f"<td>{fmt(r.get('eighth_et'), 3)}</td>"
-                f"<td>{fmt(r.get('thousand_et'), 3)}</td>"
-                f"<td>{finish}</td>"
-                f"<td>{fmt(r.get('density_altitude'), 0)}</td>"
-                "</tr>"
-            )
-        st.markdown(
-            """
+        def day_key(r):
+            return str(r.get("date") or "Unknown")
+
+        by_day = {}
+        for r in runs:
+            by_day.setdefault(day_key(r), []).append(r)
+        days = sorted(by_day.keys(), reverse=True)
+
+        for day in days:
+            day_runs = sorted(by_day[day], key=lambda r: str(r.get("time") or ""), reverse=True)
+            names = []
+            for r in day_runs:
+                n = str(r.get("vehicle") or "").strip()
+                if n and n not in names:
+                    names.append(n)
+            tracks = []
+            for r in day_runs:
+                t = str(r.get("track") or "").strip()
+                if t and t not in tracks:
+                    tracks.append(t)
+            preview = " · ".join([p for p in [" / ".join(names), " / ".join(tracks), f"{len(day_runs)} runs"] if p])
+            with st.expander(f"{day} · {preview}", expanded=False):
+                rows_html = []
+                for r in day_runs:
+                    shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#1a1a1a"))
+                    finish = f"{fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}" if r.get("et") not in [None, ""] else f"{fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
+                    mark = " · off" if str(r.get("excluded") or "").lower() in ["yes", "true", "1"] else ""
+                    rows_html.append(
+                        "<tr style='background:" + shade + ";'>"
+                        f"<td>{when_label(r)}{mark}</td>"
+                        f"<td>{fmt(r.get('sixty_ft'), 3)}</td>"
+                        f"<td>{fmt(r.get('three_thirty_ft'), 3)}</td>"
+                        f"<td>{fmt(r.get('eighth_et'), 3)}</td>"
+                        f"<td>{fmt(r.get('thousand_et'), 3)}</td>"
+                        f"<td>{finish}</td>"
+                        f"<td>{fmt(r.get('density_altitude'), 0)}</td>"
+                        "</tr>"
+                    )
+                st.markdown(
+                    """
 <style>
 .ss-grid { width:100%; border-collapse:collapse; font-size:13px; }
 .ss-grid th { text-align:left; padding:8px 6px; color:#c9a227; font-size:11px; }
@@ -1446,38 +1514,54 @@ if st.session_state.nav == "Log Book":
 <div class="ss-wrap"><table class="ss-grid">
 <tr><th>When</th><th>60'</th><th>330'</th><th>1/8</th><th>1000'</th><th>Finish</th><th>DA</th></tr>
 """ + "".join(rows_html) + "</table></div>",
-            unsafe_allow_html=True,
-        )
-        for r in display:
-            label = f"{when_label(r)}  {fmt(r.get('et'), 3) if r.get('et') not in [None,''] else fmt(r.get('eighth_et'), 3)}"
-            with st.expander(label):
-                lines = [
-                    ("Dial", r.get("dial"), 3),
-                    ("R/T", r.get("reaction_time"), 3),
-                    ("60'", r.get("sixty_ft"), 3),
-                    ("330'", r.get("three_thirty_ft"), 3),
-                    ("1/8 ET", r.get("eighth_et"), 3),
-                    ("1/8 MPH", r.get("eighth_mph"), 1),
-                    ("1000'", r.get("thousand_et"), 3),
-                    ("1/4 ET", r.get("et"), 3),
-                    ("1/4 MPH", r.get("trap_mph"), 1),
-                    ("MOV", r.get("mov"), 3),
-                ]
-                shown = [f"**{lab}:** {fmt(val, dig)}" for lab, val, dig in lines if val not in [None, ""]]
-                if shown:
-                    st.markdown("  \n".join(shown))
-                st.write(
-                    f"Temp {fmt(r.get('temp_f'), 1)}°F · "
-                    f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
-                    f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
-                    f"DA {fmt(r.get('density_altitude'), 0)} · "
-                    f"Grains {fmt(r.get('water_grains'), 1)} · "
-                    f"Air {fmt(r.get('air_density_pct'), 2)}% · "
-                    f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
+                    unsafe_allow_html=True,
                 )
-                note = clean_notes(r.get("notes"))
-                if note:
-                    st.write(note)
+                options = {str(r.get("id")): when_label(r) for r in day_runs}
+                picked = st.radio("Open a run", list(options.keys()), format_func=lambda i: options.get(i, i), key=f"open_{day}")
+                r = next((x for x in day_runs if str(x.get("id")) == str(picked)), None)
+                if r:
+                    lines = [
+                        ("Dial", r.get("dial"), 3),
+                        ("R/T", r.get("reaction_time"), 3),
+                        ("60'", r.get("sixty_ft"), 3),
+                        ("330'", r.get("three_thirty_ft"), 3),
+                        ("1/8 ET", r.get("eighth_et"), 3),
+                        ("1/8 MPH", r.get("eighth_mph"), 1),
+                        ("1000'", r.get("thousand_et"), 3),
+                        ("1/4 ET", r.get("et"), 3),
+                        ("1/4 MPH", r.get("trap_mph"), 1),
+                        ("MOV", r.get("mov"), 3),
+                    ]
+                    shown = [f"**{lab}:** {fmt(val, dig)}" for lab, val, dig in lines if val not in [None, ""]]
+                    if shown:
+                        st.markdown("  \n".join(shown))
+                    st.write(
+                        f"Temp {fmt(r.get('temp_f'), 1)}°F · "
+                        f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
+                        f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
+                        f"DA {fmt(r.get('density_altitude'), 0)} · "
+                        f"Grains {fmt(r.get('water_grains'), 1)} · "
+                        f"Air {fmt(r.get('air_density_pct'), 2)}% · "
+                        f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
+                    )
+                    note = clean_notes(r.get("notes"))
+                    if note:
+                        st.write(note)
+                    excluded = str(r.get("excluded") or "").lower() in ["yes", "true", "1"]
+                    if excluded:
+                        st.caption("This run is excluded from predictions.")
+                    cdel, cexc = st.columns(2)
+                    with cexc:
+                        label = "Include in predictions" if excluded else "Exclude from predictions"
+                        if st.button(label, key=f"exc_{r.get('id')}"):
+                            r["excluded"] = "" if excluded else "yes"
+                            set_run_excluded(r.get("id"), not excluded)
+                            st.rerun()
+                    with cdel:
+                        if st.button("Delete this run", key=f"delrun_{r.get('id')}"):
+                            st.session_state.runs = [x for x in st.session_state.runs if str(x.get("id")) != str(r.get("id"))]
+                            delete_run_from_sheet(r.get("id"))
+                            st.rerun()
 
 # ====================== SETTINGS ======================
 if st.session_state.nav == "Settings":
@@ -1617,4 +1701,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.8.3")
+st.caption("Smart Slip v2.8.4")
