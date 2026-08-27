@@ -1060,7 +1060,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.10 • Auto Log • Weather • Predict</p>
+    <p>v2.8.11 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1243,21 +1243,32 @@ if st.session_state.nav == "Auto Log":
         else:
             with st.spinner("🏁 Reading the timeslip..."):
                 img_bytes = uploaded.read()
-                prompt = f"""Extract data from this timeslip photo. ONLY use the side for car number {car_number or 'the main car'}.
+                prompt = f"""Read this Compulink timeslip photo.
 
-Identify the drag strip / track name from the slip header if shown (example: NUMIDIA DRAGWAY).
+Use ONLY the column for car number {car_number or 'the entered car'}.
+LEFT and RIGHT are two cars. Match Car # on that side (example: 1215 is LEFT, N199 is RIGHT).
 
-Output ONLY key=value lines, one per line. No extra text.
-If a value is missing write key=None
+Row order on these slips is ALWAYS:
+- DIAL
+- R/T
+- 60'     -> sixty_ft   (this is about 1.2 to 1.8 for a door car, NEVER 4+ seconds)
+- 330     -> three_thirty_ft
+- 1/8     -> eighth_et
+- MPH     (the MPH directly under 1/8) -> eighth_mph
+- 1000    -> thousand_et
+- 1/4     -> et
+- MPH     (the MPH directly under 1/4) -> trap_mph
 
-If a value is not on the slip, leave that key blank or None. Do not invent zeros.
-dial is the dial-in. reaction_time is R/T. eighth_et / eighth_mph are 1/8 or 660'. thousand_et is 1000' ET. et is 1/4 ET. trap_mph is 1/4 MPH. mov is margin of victory.
+Do not shift rows. 60' is not 330. 330 is not 1/8.
+If a value is missing use None. Do not invent zeros.
 
-Required fields:
+Track name is in the header (example: NUMIDIA DRAGWAY).
+date and time are at the top.
+
+Output ONLY key=value lines:
 date=
 time=
 track=
-vehicle=
 dial=
 reaction_time=
 sixty_ft=
@@ -1268,11 +1279,6 @@ thousand_et=
 et=
 trap_mph=
 mov=
-temp_f=
-altimeter_inhg=
-humidity_pct=
-density_altitude=
-water_grains=
 notes=
 """
                 result, err = call_grok(prompt, image_bytes=img_bytes)
@@ -1283,6 +1289,16 @@ notes=
                     if not data:
                         st.error("Could not read the slip. Try a clearer photo.")
                     else:
+                        try:
+                            s = data.get("sixty_ft")
+                            t330 = data.get("three_thirty_ft")
+                            e8 = data.get("eighth_et")
+                            if s not in [None, ""] and t330 not in [None, ""] and e8 in [None, ""] and float(s) > 2.8:
+                                data["eighth_et"] = t330
+                                data["three_thirty_ft"] = s
+                                data["sixty_ft"] = None
+                        except Exception:
+                            pass
                         profile_name = ""
                         if selected_profile_id:
                             p = get_profile_by_id(selected_profile_id)
@@ -1318,36 +1334,47 @@ notes=
                             "vapor_pressure": data.get("vapor_pressure"),
                             "notes": final_notes
                         }
-                        sheet_ok = save_run_to_sheet(new_run)
-                        st.session_state.runs.append(new_run)
-                        try:
-                            track_name = data.get("track") or "Numidia Dragway"
-                            wx_text, wx_err = grok_lookup_weather(
-                                track_name, data.get("date"), data.get("time")
-                            )
-                            if wx_text:
-                                wx = parse_import_block(wx_text)
-                                for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
-                                          "water_grains", "air_density_pct", "vapor_pressure"]:
-                                    if new_run.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
-                                        new_run[k] = wx[k]
-                                if new_run.get("temp_f") and new_run.get("altimeter_inhg"):
-                                    extra = calculate_weather(
-                                        new_run.get("temp_f"),
-                                        new_run.get("altimeter_inhg"),
-                                        new_run.get("humidity_pct", 50)
-                                    )
-                                    for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
-                                        if not new_run.get(k) and extra.get(k) is not None:
-                                            new_run[k] = extra.get(k)
-                                update_run_in_sheet(new_run)
-                        except Exception:
-                            pass
-                        et_s = f" ET {float(new_run['et']):.3f}s" if new_run.get("et") not in [None, ""] else ""
-                        if sheet_ok:
-                            st.success(f"Run saved.{et_s}")
+                        auto_fp = str({
+                            "date": new_run.get("date"),
+                            "time": new_run.get("time"),
+                            "et": new_run.get("et"),
+                            "sixty_ft": new_run.get("sixty_ft"),
+                            "profile_id": new_run.get("profile_id"),
+                        })
+                        if auto_fp == st.session_state.get("auto_last_fp"):
+                            st.error("That slip was already saved.")
                         else:
-                            st.error("Read the slip but could not save it to the Google Sheet.")
+                            sheet_ok = save_run_to_sheet(new_run)
+                            st.session_state.runs.append(new_run)
+                            st.session_state.auto_last_fp = auto_fp
+                            try:
+                                track_name = data.get("track") or "Numidia Dragway"
+                                wx_text, wx_err = grok_lookup_weather(
+                                    track_name, data.get("date"), data.get("time")
+                                )
+                                if wx_text:
+                                    wx = parse_import_block(wx_text)
+                                    for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
+                                              "water_grains", "air_density_pct", "vapor_pressure"]:
+                                        if new_run.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
+                                            new_run[k] = wx[k]
+                                    if new_run.get("temp_f") and new_run.get("altimeter_inhg"):
+                                        extra = calculate_weather(
+                                            new_run.get("temp_f"),
+                                            new_run.get("altimeter_inhg"),
+                                            new_run.get("humidity_pct", 50)
+                                        )
+                                        for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
+                                            if not new_run.get(k) and extra.get(k) is not None:
+                                                new_run[k] = extra.get(k)
+                                    update_run_in_sheet(new_run)
+                            except Exception:
+                                pass
+                            et_s = f" ET {float(new_run['et']):.3f}s" if new_run.get("et") not in [None, ""] else ""
+                            if sheet_ok:
+                                st.success(f"Run saved.{et_s}")
+                            else:
+                                st.error("Read the slip but could not save it to the Google Sheet.")
 
 # ====================== MANUAL LOG ======================
 if st.session_state.nav == "Manual Log":
@@ -1819,4 +1846,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.10")
+st.caption("Smart Slip v2.8.11")
