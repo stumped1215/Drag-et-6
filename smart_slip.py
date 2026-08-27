@@ -624,12 +624,19 @@ def load_data_from_sheet():
         return False
 
 def _ensure_runs_ws(sheet):
+    need_cols = 30
+    need_rows = 3000
     try:
         ws = sheet.worksheet(WORKSHEET_RUNS)
     except Exception:
-        ws = sheet.add_worksheet(title=WORKSHEET_RUNS, rows=2000, cols=len(RUN_HEADERS) + 2)
+        ws = sheet.add_worksheet(title=WORKSHEET_RUNS, rows=need_rows, cols=need_cols)
         ws.update("A1", [RUN_HEADERS])
         return ws
+    try:
+        ws.resize(rows=max(ws.row_count or 1000, need_rows),
+                  cols=max(ws.col_count or 23, need_cols))
+    except Exception:
+        pass
     headers = [str(h).strip() for h in ws.row_values(1)]
     if not headers:
         ws.update("A1", [RUN_HEADERS])
@@ -638,13 +645,8 @@ def _ensure_runs_ws(sheet):
     missing = [h for h in RUN_HEADERS if h not in lower]
     if missing:
         start = len(headers) + 1
-        for i, h in enumerate(missing):
-            ws.update_cell(1, start + i, h)
-    if ws.row_count < 2000 or ws.col_count < len(RUN_HEADERS) + 2:
-        try:
-            ws.resize(rows=max(ws.row_count, 2000), cols=max(ws.col_count, len(RUN_HEADERS) + 2))
-        except Exception:
-            pass
+        cells = [gspread.Cell(1, start + i, h) for i, h in enumerate(missing)]
+        ws.update_cells(cells)
     return ws
 
 def save_run_to_sheet(run: dict):
@@ -1058,7 +1060,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.8 • Auto Log • Weather • Predict</p>
+    <p>v2.8.10 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1393,40 +1395,65 @@ if st.session_state.nav == "Manual Log":
     mov = st.number_input("MOV", value=None, step=0.001, format="%.3f", key="manual_mov")
     st.caption("Notes matter for spin, lift, brakes, nitrous.")
     notes = st.text_area("Notes", height=90, key="manual_notes")
-    if st.button("Save Run", type="primary", use_container_width=True, key="manual_save"):
-        new_run = {
-            "id": str(datetime.now().timestamp()),
-            "user": st.session_state.user_name,
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "time": datetime.now().strftime("%H:%M"),
-            "track": track,
-            "vehicle": vehicle_name,
-            "profile_id": selected_profile_id,
-            "dial": dial,
-            "reaction_time": rt,
-            "et": et,
-            "sixty_ft": sixty,
-            "three_thirty_ft": three_thirty,
-            "eighth_et": eighth,
-            "eighth_mph": eighth_mph,
-            "thousand_et": thousand_et,
-            "trap_mph": trap,
-            "mov": mov,
-            "density_altitude": da,
-            "temp_f": temp_f,
-            "altimeter_inhg": altim,
-            "humidity_pct": humidity,
-            "water_grains": grains,
-            "air_density_pct": air_pct,
-            "vapor_pressure": vapor,
-            "notes": notes
-        }
-        st.session_state.runs.append(new_run)
-        if save_run_to_sheet(new_run):
-            st.success("Run saved!")
+    msg = st.session_state.get("manual_save_msg")
+    if msg:
+        if msg[0] == "ok":
+            st.success(msg[1])
         else:
-            st.warning("Saved locally only.")
-        st.rerun()
+            st.error(msg[1])
+    if st.button("Save Run", type="primary", use_container_width=True, key="manual_save"):
+        payload = {
+            "profile_id": str(selected_profile_id or ""),
+            "track": track,
+            "dial": dial, "reaction_time": rt, "et": et,
+            "sixty_ft": sixty, "three_thirty_ft": three_thirty,
+            "eighth_et": eighth, "eighth_mph": eighth_mph,
+            "thousand_et": thousand_et, "trap_mph": trap, "mov": mov,
+            "temp_f": temp_f, "altimeter_inhg": altim, "humidity_pct": humidity,
+            "density_altitude": da, "notes": notes,
+        }
+        fp = str(payload)
+        if fp == st.session_state.get("manual_last_fp"):
+            st.session_state.manual_save_msg = ("err", "That run is already saved. Change a value to save another.")
+            st.error("That run is already saved. Change a value to save another.")
+        else:
+            new_run = {
+                "id": str(datetime.now().timestamp()),
+                "user": st.session_state.get("user_email") or st.session_state.user_name,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "time": datetime.now().strftime("%H:%M"),
+                "track": track,
+                "vehicle": vehicle_name,
+                "profile_id": selected_profile_id,
+                "dial": dial,
+                "reaction_time": rt,
+                "et": et,
+                "sixty_ft": sixty,
+                "three_thirty_ft": three_thirty,
+                "eighth_et": eighth,
+                "eighth_mph": eighth_mph,
+                "thousand_et": thousand_et,
+                "trap_mph": trap,
+                "mov": mov,
+                "density_altitude": da,
+                "temp_f": temp_f,
+                "altimeter_inhg": altim,
+                "humidity_pct": humidity,
+                "water_grains": grains,
+                "air_density_pct": air_pct,
+                "vapor_pressure": vapor,
+                "notes": notes
+            }
+            sheet_ok = save_run_to_sheet(new_run)
+            if sheet_ok:
+                st.session_state.runs.append(new_run)
+                st.session_state.manual_last_fp = fp
+                et_s = f" ET {float(et):.3f}s" if et not in [None, ""] else ""
+                st.session_state.manual_save_msg = ("ok", f"Run saved.{et_s}")
+                st.success(f"Run saved.{et_s}")
+            else:
+                st.session_state.manual_save_msg = ("err", "Could not save this run to the Google Sheet.")
+                st.error("Could not save this run to the Google Sheet.")
 
 # ====================== PREDICT + GROK ======================
 if st.session_state.nav == "Predict":
@@ -1792,4 +1819,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.8")
+st.caption("Smart Slip v2.8.10")
