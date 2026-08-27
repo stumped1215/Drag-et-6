@@ -645,6 +645,22 @@ def delete_run_from_sheet(run_id):
     except Exception:
         return False
 
+def update_run_in_sheet(run: dict):
+    client = get_gspread_client()
+    if client is None or not run.get("id"):
+        return False
+    try:
+        ws = client.open(SHEET_NAME).worksheet(WORKSHEET_RUNS)
+        headers = ws.row_values(1)
+        idx, _ = _run_row_index(ws, run.get("id"))
+        if not idx:
+            return save_run_to_sheet(run)
+        for h in headers:
+            ws.update_cell(idx, headers.index(h) + 1, run.get(h, "") if run.get(h) is not None else "")
+        return True
+    except Exception:
+        return False
+
 def set_run_excluded(run_id, excluded: bool):
     client = get_gspread_client()
     if client is None:
@@ -996,7 +1012,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.6 • Auto Log • Weather • Predict</p>
+    <p>v2.8.7 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1215,40 +1231,10 @@ notes=
                 if err:
                     st.error(f"Smart Slip error: {err}")
                 else:
-                    st.code(result, language="text")
                     data = parse_import_block(result)
                     if not data:
                         st.error("Could not read the slip. Try a clearer photo.")
                     else:
-                        # Look up weather for the track + time on the slip
-                        track_name = data.get("track") or "Numidia Dragway"
-                        with st.spinner("🌤 Looking up track weather for that time..."):
-                            wx_text, wx_err = grok_lookup_weather(
-                                track_name, data.get("date"), data.get("time")
-                            )
-                        if wx_text:
-                            st.caption("Weather lookup")
-                            st.code(wx_text, language="text")
-                            wx = parse_import_block(wx_text)
-                            for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
-                                      "water_grains", "air_density_pct", "vapor_pressure"]:
-                                if data.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
-                                    data[k] = wx[k]
-                            if wx.get("weather_source"):
-                                src = str(wx.get("weather_source"))
-                                data["notes"] = ((data.get("notes") or "") + f" | wx:{src}").strip(" |")
-                        elif wx_err:
-                            st.warning(f"Weather lookup failed: {wx_err}")
-                        # Recalc grains/DA if we have temp + baro + humidity
-                        if data.get("temp_f") and data.get("altimeter_inhg"):
-                            extra = calculate_weather(
-                                data.get("temp_f"),
-                                data.get("altimeter_inhg"),
-                                data.get("humidity_pct", 50)
-                            )
-                            for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
-                                if not data.get(k) and extra.get(k) is not None:
-                                    data[k] = extra.get(k)
                         profile_name = ""
                         if selected_profile_id:
                             p = get_profile_by_id(selected_profile_id)
@@ -1259,7 +1245,7 @@ notes=
                             final_notes = (final_notes + " | " + notes).strip(" |")
                         new_run = {
                             "id": str(datetime.now().timestamp()),
-                            "user": st.session_state.user_name,
+                            "user": st.session_state.get("user_email") or st.session_state.user_name,
                             "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
                             "time": data.get("time", ""),
                             "track": data.get("track", "Unknown"),
@@ -1284,13 +1270,36 @@ notes=
                             "vapor_pressure": data.get("vapor_pressure"),
                             "notes": final_notes
                         }
+                        sheet_ok = save_run_to_sheet(new_run)
                         st.session_state.runs.append(new_run)
-                        if save_run_to_sheet(new_run):
-                            et_s = f" ET {new_run['et']:.3f}s" if new_run.get("et") not in [None, ""] else ""
+                        try:
+                            track_name = data.get("track") or "Numidia Dragway"
+                            wx_text, wx_err = grok_lookup_weather(
+                                track_name, data.get("date"), data.get("time")
+                            )
+                            if wx_text:
+                                wx = parse_import_block(wx_text)
+                                for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
+                                          "water_grains", "air_density_pct", "vapor_pressure"]:
+                                    if new_run.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
+                                        new_run[k] = wx[k]
+                                if new_run.get("temp_f") and new_run.get("altimeter_inhg"):
+                                    extra = calculate_weather(
+                                        new_run.get("temp_f"),
+                                        new_run.get("altimeter_inhg"),
+                                        new_run.get("humidity_pct", 50)
+                                    )
+                                    for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
+                                        if not new_run.get(k) and extra.get(k) is not None:
+                                            new_run[k] = extra.get(k)
+                                update_run_in_sheet(new_run)
+                        except Exception:
+                            pass
+                        et_s = f" ET {float(new_run['et']):.3f}s" if new_run.get("et") not in [None, ""] else ""
+                        if sheet_ok:
                             st.success(f"Run saved.{et_s}")
                         else:
-                            st.warning("Saved locally only.")
-                        st.rerun()
+                            st.error("Read the slip but could not save it to the Google Sheet.")
 
 # ====================== MANUAL LOG ======================
 if st.session_state.nav == "Manual Log":
@@ -1513,49 +1522,41 @@ if st.session_state.nav == "Log Book":
                     tracks.append(t)
             preview = " · ".join([p for p in [" / ".join(names), " / ".join(tracks), f"{len(day_runs)} runs"] if p])
             with st.expander(f"{day} · {preview}", expanded=False):
-                rows_html = []
-                for r in day_runs:
-                    shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#1a1a1a"))
+                grid = []
+                for r0 in day_runs:
                     eighth = "—"
-                    if r.get("eighth_et") not in [None, ""]:
-                        eighth = f"{fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
+                    if r0.get("eighth_et") not in [None, ""]:
+                        eighth = fmt(r0.get("eighth_et"), 3)
+                        if r0.get("eighth_mph") not in [None, ""]:
+                            eighth += f" @ {fmt(r0.get('eighth_mph'), 1)}"
                     quarter = "—"
-                    if r.get("et") not in [None, ""]:
-                        quarter = f"{fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}"
-                    mark = " *" if str(r.get("excluded") or "").lower() in ["yes", "true", "1"] else ""
-                    rows_html.append(
-                        "<tr style='background:" + shade + ";'>"
-                        f"<td>{time_only(r)}{mark}</td>"
-                        f"<td>{fmt(r.get('sixty_ft'), 3)}</td>"
-                        f"<td>{fmt(r.get('three_thirty_ft'), 3)}</td>"
-                        f"<td>{eighth}</td>"
-                        f"<td>{fmt(r.get('thousand_et'), 3)}</td>"
-                        f"<td>{quarter}</td>"
-                        f"<td>{fmt(r.get('density_altitude'), 0)}</td>"
-                        "</tr>"
-                    )
-                st.markdown(
-                    """
-<style>
-.ss-grid { width:100%; border-collapse:collapse; font-size:13px; }
-.ss-grid th { text-align:left; padding:8px 6px; color:#c9a227; font-size:11px; }
-.ss-grid td { padding:8px 6px; white-space:nowrap; }
-.ss-wrap { overflow-x:auto; border-radius:12px; }
-</style>
-<div class="ss-wrap"><table class="ss-grid">
-<tr><th>Time</th><th>60'</th><th>330'</th><th>1/8</th><th>1000'</th><th>1/4</th><th>DA</th></tr>
-""" + "".join(rows_html) + "</table></div>",
-                    unsafe_allow_html=True,
+                    if r0.get("et") not in [None, ""]:
+                        quarter = fmt(r0.get("et"), 3)
+                        if r0.get("trap_mph") not in [None, ""]:
+                            quarter += f" @ {fmt(r0.get('trap_mph'), 1)}"
+                    grid.append({
+                        "Time": time_only(r0),
+                        "60'": fmt(r0.get("sixty_ft"), 3),
+                        "330'": fmt(r0.get("three_thirty_ft"), 3),
+                        "1/8": eighth,
+                        "1000'": fmt(r0.get("thousand_et"), 3),
+                        "1/4": quarter,
+                        "DA": fmt(r0.get("density_altitude"), 0),
+                    })
+                event = st.dataframe(
+                    pd.DataFrame(grid),
+                    hide_index=True,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key=f"grid_{day}",
                 )
-                options = [" "] + [str(r.get("id")) for r in day_runs]
-                labels_map = {str(r.get("id")): time_only(r) for r in day_runs}
-                picked = st.selectbox(
-                    "Open a run",
-                    options,
-                    format_func=lambda i: labels_map.get(i, "Select time"),
-                    key=f"open_{day}",
-                )
-                r = next((x for x in day_runs if str(x.get("id")) == str(picked)), None)
+                picked_idx = []
+                try:
+                    picked_idx = list(event.selection.rows)
+                except Exception:
+                    picked_idx = []
+                r = day_runs[picked_idx[0]] if picked_idx else None
                 if r:
                     extra = []
                     if r.get("dial") not in [None, ""]:
@@ -1743,4 +1744,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.6")
+st.caption("Smart Slip v2.8.7")
