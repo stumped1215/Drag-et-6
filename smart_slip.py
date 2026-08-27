@@ -56,12 +56,23 @@ st.markdown("""
 <meta name="theme-color" content="#0e0e0e">
 """, unsafe_allow_html=True)
 
-if ICON_URL:
-    st.markdown(f"""
+st.markdown(f"""
 <script>
 (function() {{
+  document.title = "Smart Slip";
+  function setMeta(name, content) {{
+    let el = document.querySelector('meta[name="' + name + '"]');
+    if (!el) {{
+      el = document.createElement('meta');
+      el.setAttribute('name', name);
+      document.head.appendChild(el);
+    }}
+    el.setAttribute('content', content);
+  }}
+  setMeta('apple-mobile-web-app-title', 'Smart Slip');
+  setMeta('application-name', 'Smart Slip');
   const url = {ICON_URL!r};
-  function setIcon() {{
+  if (url) {{
     let link = document.querySelector('link[rel="apple-touch-icon"]');
     if (!link) {{
       link = document.createElement('link');
@@ -69,15 +80,7 @@ if ICON_URL:
       document.head.appendChild(link);
     }}
     link.href = url;
-    let short = document.querySelector('meta[name="apple-mobile-web-app-title"]');
-    if (!short) {{
-      short = document.createElement('meta');
-      short.name = 'apple-mobile-web-app-title';
-      document.head.appendChild(short);
-    }}
-    short.content = 'Smart Slip';
   }}
-  setIcon();
 }})();
 </script>
 """, unsafe_allow_html=True)
@@ -85,7 +88,10 @@ if ICON_URL:
 st.markdown("""
 <style>
   #MainMenu, header, footer, .stDeployButton, [data-testid="stToolbar"],
-  [data-testid="stDecoration"], [data-testid="stStatusWidget"] { display: none !important; }
+  [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+  [data-testid="stAppDeployButton"], .stAppDeployButton,
+  .viewerBadge_container__r5tak, .viewerBadge_linkContainer__q7KiB,
+  [data-testid="manageAppButton"] { display: none !important; }
   .stApp { background: #0e0e0e; }
   .block-container {
     padding-top: 0.6rem !important;
@@ -181,6 +187,10 @@ if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 if "auth_ready" not in st.session_state:
     st.session_state.auth_ready = False
+if "auth_persist" not in st.session_state:
+    st.session_state.auth_persist = ""
+if "auth_clear" not in st.session_state:
+    st.session_state.auth_clear = False
 if "runs" not in st.session_state:
     st.session_state.runs = []
 if "car_profiles" not in st.session_state:
@@ -743,8 +753,7 @@ def set_logged_in(email, token, display_name, cookies=None):
     st.session_state.user_email = email
     st.session_state.user_name = display_name or email
     st.session_state.data_loaded = False
-    if cookies is not None:
-        cookies.set(AUTH_COOKIE, f"{email}|{token}", expires_at=datetime.now() + timedelta(days=AUTH_DAYS))
+    st.session_state.auth_persist = f"{email}|{token}"
 
 def clear_login(cookies=None):
     email = st.session_state.get("user_email")
@@ -759,8 +768,8 @@ def clear_login(cookies=None):
         st.session_state[k] = None if k in ["user_name", "user_email"] else (
             False if k in ["is_admin", "data_loaded"] else ([] if k in ["runs", "car_profiles"] else None)
         )
-    if cookies is not None:
-        cookies.delete(AUTH_COOKIE)
+    st.session_state.auth_persist = ""
+    st.session_state.auth_clear = True
 
 # ====================== UI ======================
 st.markdown(f"""
@@ -768,24 +777,59 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.6.7 • Photo • Weather • Predict</p>
+    <p>v2.7.0 • Photo • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Cookie component breaks on iPhone Streamlit ("not connected to a server").
-# Stay-logged-in is session-only until we use a different method.
 cookies = None
 
-# Restore session from cookie
-if st.session_state.user_name is None and cookies is not None:
-    raw = cookies.get(AUTH_COOKIE)
+# Restore login from ?ss_auth= then from the phone's localStorage
+if st.session_state.user_name is None:
+    raw = ""
+    try:
+        raw = st.query_params.get("ss_auth", "")
+        if isinstance(raw, list):
+            raw = raw[0] if raw else ""
+    except Exception:
+        raw = ""
     if raw and "|" in str(raw):
         email, token = str(raw).split("|", 1)
         row = user_from_token(email, token)
         if row:
             st.session_state.user_email = email
             st.session_state.user_name = row.get("display_name") or email
+            st.session_state.auth_persist = f"{email}|{token}"
+    else:
+        st.markdown("""
+<script>
+(function() {
+  try {
+    const v = localStorage.getItem('smartslip_auth');
+    const params = new URLSearchParams(window.location.search);
+    if (v && v.indexOf('|') !== -1 && !params.get('ss_auth')) {
+      params.set('ss_auth', v);
+      window.location.replace(window.location.pathname + '?' + params.toString());
+    }
+  } catch (e) {}
+})();
+</script>
+""", unsafe_allow_html=True)
+
+if st.session_state.get("auth_persist"):
+    val = st.session_state.auth_persist
+    st.markdown(f"""
+<script>
+try {{ localStorage.setItem('smartslip_auth', {val!r}); }} catch (e) {{}}
+</script>
+""", unsafe_allow_html=True)
+if st.session_state.get("auth_clear"):
+    st.markdown("""
+<script>
+try { localStorage.removeItem('smartslip_auth'); } catch (e) {}
+</script>
+""", unsafe_allow_html=True)
+    st.session_state.auth_clear = False
 
 # ---------- User / Admin Login ----------
 if st.session_state.user_name is None:
@@ -874,16 +918,17 @@ with st.sidebar:
         clear_login(cookies)
         st.rerun()
 
+labels = ["Photo", "Log", "Predict", "History", "Settings"]
 if "nav" not in st.session_state:
     st.session_state.nav = "Photo"
-nav_cols = st.columns(5)
-labels = ["Photo", "Log", "Predict", "History", "Settings"]
-for i, label in enumerate(labels):
-    if nav_cols[i].button(label, use_container_width=True, key=f"nav_{label}",
-                          type="primary" if st.session_state.nav == label else "secondary"):
-        st.session_state.nav = label
-        st.rerun()
-st.divider()
+st.session_state.nav = st.radio(
+    "Section",
+    labels,
+    index=labels.index(st.session_state.nav) if st.session_state.nav in labels else 0,
+    horizontal=True,
+    label_visibility="collapsed",
+    key="nav_radio",
+)
 
 # ====================== PHOTO IMPORT (NEW) ======================
 if st.session_state.nav == "Photo":
@@ -1302,4 +1347,4 @@ Also add `extra-streamlit-components` to requirements.txt so login stays saved o
                 st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.6.7")
+st.caption("Smart Slip v2.7.0")
