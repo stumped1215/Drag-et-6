@@ -643,6 +643,30 @@ def save_profile_to_sheet(profile: dict):
         st.error(f"Failed to save profile: {e}")
         return False
 
+def update_profile_to_sheet(profile: dict):
+    client = get_gspread_client()
+    if client is None:
+        return False
+    try:
+        sheet = client.open(SHEET_NAME)
+        ws = sheet.worksheet(WORKSHEET_PROFILES)
+        headers = ws.row_values(1)
+        if "car_number" not in headers:
+            ws.update_cell(1, len(headers) + 1, "car_number")
+            headers = ws.row_values(1)
+        records = ws.get_all_records()
+        pid = str(profile.get("id"))
+        for i, row in enumerate(records, start=2):
+            if str(row.get("id")) == pid:
+                for h in headers:
+                    if h in profile:
+                        ws.update_cell(i, headers.index(h) + 1, profile.get(h, ""))
+                return True
+        return save_profile_to_sheet(profile)
+    except Exception as e:
+        st.error(f"Failed to update profile: {e}")
+        return False
+
 def delete_profile_and_runs(profile: dict):
     pid = str(profile.get("id", ""))
     pname = str(profile.get("name", ""))
@@ -756,7 +780,7 @@ def create_user(email: str, password: str, display_name: str):
         return False, "Password must be at least 6 characters."
     existing, _ = find_user(email)
     if existing:
-        return False, "That email already has an account."
+        return False, "That email already has an account. Use Log in or Reset password."
     salt, digest = _hash_pw(password)
     session = pysecrets.token_urlsafe(24)
     device = pysecrets.token_urlsafe(24)
@@ -907,7 +931,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.9 • Auto Log • Weather • Predict</p>
+    <p>v2.8.0 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1055,7 +1079,7 @@ user_profiles = st.session_state.get("car_profiles") or []
 # ====================== PHOTO IMPORT (NEW) ======================
 if st.session_state.nav == "Auto Log":
     st.subheader("Auto Log")
-    st.write("Take a clear photo of your timeslip. Grok will extract the data automatically.")
+    st.write("Take a clear photo of your timeslip. Smart Slip will extract the data automatically.")
 
     user_profiles = st.session_state.car_profiles
     if user_profiles:
@@ -1080,15 +1104,15 @@ if st.session_state.nav == "Auto Log":
 
     notes = st.text_area("Additional Notes (spin / lift / brakes)", height=70, key="photo_notes")
 
-    if st.button("Extract with Grok", type="primary", use_container_width=True):
+    if st.button("Extract with Smart Slip", type="primary", use_container_width=True):
         if not str(car_number or "").strip():
-            st.error("Enter the car number before Grok can read the slip.")
+            st.error("Enter the car number before Smart Slip can read the slip.")
         elif not uploaded:
             st.error("Please upload a photo first.")
         elif not get_xai_client():
-            st.error("Grok API not configured. Add `XAI_API_KEY` to Streamlit Secrets.")
+            st.error("Smart Slip is not connected. Add `XAI_API_KEY` to Streamlit Secrets.")
         else:
-            with st.spinner("🏁 Grok is reading the timeslip..."):
+            with st.spinner("🏁 Reading the timeslip..."):
                 img_bytes = uploaded.read()
                 prompt = f"""Extract data from this timeslip photo. ONLY use the side for car number {car_number or 'the main car'}.
 
@@ -1124,7 +1148,7 @@ notes=
 """
                 result, err = call_grok(prompt, image_bytes=img_bytes)
                 if err:
-                    st.error(f"Grok error: {err}")
+                    st.error(f"Smart Slip error: {err}")
                 else:
                     st.code(result, language="text")
                     data = parse_import_block(result)
@@ -1133,7 +1157,7 @@ notes=
                     else:
                         # Look up weather for the track + time on the slip
                         track_name = data.get("track") or "Numidia Dragway"
-                        with st.spinner("🌤 Grok is looking up track weather for that time..."):
+                        with st.spinner("🌤 Looking up track weather for that time..."):
                             wx_text, wx_err = grok_lookup_weather(
                                 track_name, data.get("date"), data.get("time")
                             )
@@ -1286,7 +1310,7 @@ if st.session_state.nav == "Manual Log":
 
 # ====================== PREDICT + GROK ======================
 if st.session_state.nav == "Predict":
-    st.subheader("Predict ET with Grok")
+    st.subheader("Predict ET with Smart Slip")
     all_vehicles = sorted(list(set(r.get("vehicle", "Unknown") for r in st.session_state.runs)))
     if not all_vehicles:
         st.info("No runs yet for your account.")
@@ -1317,9 +1341,9 @@ if st.session_state.nav == "Predict":
         target_vapor = wx_calc.get("vapor_pressure")
         st.caption(f"**DA {target_da} ft** | **Grains {target_grains}** | **Air dens {target_air}%** | **Vapor {target_vapor} inHg**")
 
-        if st.button("Ask Grok for Prediction", type="primary", use_container_width=True):
+        if st.button("Ask Smart Slip for Prediction", type="primary", use_container_width=True):
             if not get_xai_client():
-                st.error("Add XAI_API_KEY to Streamlit Secrets first.")
+                st.error("Smart Slip is not connected. Add XAI_API_KEY to Streamlit Secrets first.")
             else:
                 recent = vehicle_runs[-6:]
                 prompt = f"You are helping with bracket racing predictions for {selected_vehicle} (user: {st.session_state.user_name}).\n\n"
@@ -1345,7 +1369,7 @@ if st.session_state.nav == "Predict":
                 prompt += f"Target weather: Temp {temp}°F | Humidity {humidity}% | Barometer {altim} inHg | DA {target_da} ft | Water grains {target_grains} | Air density {target_air}% | Vapor pressure {target_vapor} inHg\n"
                 prompt += "Use temp, humidity, barometer, and water grains together. Do not mix cars or users.\n"
                 prompt += "\nGive a smart ET prediction with clear reasoning. Do not mix data from other cars or users."
-                with st.spinner("🔥 Grok is dialing it in..."):
+                with st.spinner("🔥 Dialing it in..."):
                     result, err = call_grok(prompt)
                     if err:
                         st.error(err)
@@ -1353,7 +1377,7 @@ if st.session_state.nav == "Predict":
                         st.session_state.grok_prediction = result
                         st.success("Prediction ready")
         if st.session_state.grok_prediction:
-            st.markdown("### Grok's Prediction")
+            st.markdown("### Prediction")
             st.write(st.session_state.grok_prediction)
 
 # ====================== HISTORY ======================
@@ -1482,16 +1506,43 @@ if st.session_state.nav == "Settings":
         st.markdown("### Your Profiles")
         for p in st.session_state.car_profiles:
             with st.expander(f"{p.get('name')} ({p.get('car_type')})"):
-                if p.get("car_number"):
-                    st.write(f"Car # {p.get('car_number')}")
-                st.write(f"Fuel: {p.get('fuel_type')} | Weight: {p.get('weight')} lbs")
-                st.write(f"Tire: {p.get('tire_size')} {p.get('tire_type')}")
-                st.write(f"1st: {p.get('trans_first_gear')} | Rear: {p.get('rear_gear')}")
+                pid = str(p.get("id"))
+                e_name = st.text_input("Profile Name", value=p.get("name", ""), key=f"edit_name_{pid}")
+                e_num = st.text_input("Car Number", value=str(p.get("car_number") or ""), key=f"edit_num_{pid}")
+                types = ["Dragster", "Door Car"]
+                e_type = st.selectbox("Car Type", types, index=types.index(p.get("car_type")) if p.get("car_type") in types else 0, key=f"edit_type_{pid}")
+                fuels = ["Gas", "E85", "Alcohol"]
+                e_fuel = st.selectbox("Fuel Type", fuels, index=fuels.index(p.get("fuel_type")) if p.get("fuel_type") in fuels else 2, key=f"edit_fuel_{pid}")
+                e_weight = st.number_input("Weight (lbs)", value=float(p.get("weight") or 0), step=50.0, key=f"edit_wt_{pid}")
+                e_tire = st.text_input("Tire Size", value=str(p.get("tire_size") or ""), key=f"edit_tire_{pid}")
+                ttypes = ["Radial", "Bias"]
+                e_ttype = st.selectbox("Tire Type", ttypes, index=ttypes.index(p.get("tire_type")) if p.get("tire_type") in ttypes else 1, key=f"edit_ttype_{pid}")
+                e_first = st.number_input("1st Gear Ratio", value=float(p.get("trans_first_gear") or 1.8), step=0.05, format="%.2f", key=f"edit_first_{pid}")
+                e_rear = st.number_input("Rear Gear Ratio", value=float(p.get("rear_gear") or 4.1), step=0.05, format="%.2f", key=f"edit_rear_{pid}")
+                if st.button("Save profile", key=f"save_prof_{pid}"):
+                    new_name = e_name.strip() or p.get("name")
+                    for r in st.session_state.runs:
+                        if str(r.get("profile_id")) == pid:
+                            r["vehicle"] = new_name
+                    p.update({
+                        "name": e_name.strip() or p.get("name"),
+                        "car_number": e_num.strip(),
+                        "car_type": e_type,
+                        "fuel_type": e_fuel,
+                        "weight": e_weight,
+                        "tire_size": e_tire,
+                        "tire_type": e_ttype,
+                        "trans_first_gear": e_first,
+                        "rear_gear": e_rear,
+                    })
+                    update_profile_to_sheet(p)
+                    st.success("Profile saved.")
+                    st.rerun()
                 warn = st.checkbox(
                     f"I understand deleting {p.get('name')} will erase all stored runs for this profile",
-                    key=f"del_ok_{p.get('id')}"
+                    key=f"del_ok_{pid}"
                 )
-                if st.button("Delete this profile", key=f"del_{p.get('id')}"):
+                if st.button("Delete this profile", key=f"del_{pid}"):
                     if not warn:
                         st.error("Check the box to confirm you will lose all stored data for this profile.")
                     else:
@@ -1546,4 +1597,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.9")
+st.caption("Smart Slip v2.8.0")
