@@ -201,6 +201,7 @@ def email_is_admin(email: str) -> bool:
 WORKSHEET_RUNS = "Runs"
 WORKSHEET_PROFILES = "Profiles"
 WORKSHEET_USERS = "Users"
+WORKSHEET_BUGS = "Bugs"
 AUTH_COOKIE = "smartslip_auth"
 AUTH_DAYS = 30
 
@@ -661,6 +662,27 @@ def set_run_excluded(run_id, excluded: bool):
     except Exception:
         return False
 
+def save_bug_report(message: str):
+    client = get_gspread_client()
+    if client is None:
+        return False, "Google Sheet is not connected."
+    try:
+        sheet = client.open(SHEET_NAME)
+        try:
+            ws = sheet.worksheet(WORKSHEET_BUGS)
+        except Exception:
+            ws = sheet.add_worksheet(title=WORKSHEET_BUGS, rows=500, cols=6)
+            ws.append_row(["created_at", "user", "email", "message"])
+        ws.append_row([
+            datetime.now().isoformat(timespec="seconds"),
+            st.session_state.get("user_name") or "",
+            st.session_state.get("user_email") or "",
+            message.strip()
+        ])
+        return True, "Report sent."
+    except Exception as e:
+        return False, str(e)
+
 def save_profile_to_sheet(profile: dict):
     client = get_gspread_client()
     if client is None:
@@ -974,7 +996,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.4 • Auto Log • Weather • Predict</p>
+    <p>v2.8.5 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1570,6 +1592,17 @@ if st.session_state.nav == "Settings":
     if st.button("Log out", type="primary"):
         clear_login(cookies)
         st.rerun()
+    st.markdown("### Report a bug")
+    bug = st.text_area("What happened?", placeholder="Paste the red error and what you tapped.", key="bug_text")
+    if st.button("Send report", key="bug_send"):
+        if not str(bug or "").strip():
+            st.error("Type what went wrong first.")
+        else:
+            ok, msg = save_bug_report(bug)
+            if ok:
+                st.success("Report saved. I’ll see it on the Bugs tab in SmartSlipData.")
+            else:
+                st.error(f"Could not send report: {msg}")
     st.markdown("### Create Car Profile")
     st.caption("You can have 2 active profiles. Delete one to add another.")
     with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
@@ -1701,4 +1734,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.8.4")
+st.caption("Smart Slip v2.8.5")
