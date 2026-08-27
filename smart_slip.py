@@ -112,6 +112,33 @@ st.markdown("""
     border-radius: 12px;
     font-weight: 650;
   }
+  [data-testid="stRadio"] [role="radiogroup"] {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 0.15rem !important;
+  }
+  [data-testid="stRadio"] label {
+    font-size: 12px !important;
+    white-space: nowrap !important;
+    padding-right: 4px !important;
+  }
+  div[data-baseweb="popover"],
+  ul[role="listbox"] {
+    background: #f3f3f3 !important;
+    color: #111 !important;
+  }
+  li[role="option"],
+  div[data-baseweb="option"] {
+    color: #111 !important;
+    background: #f3f3f3 !important;
+  }
+  li[role="option"]:hover,
+  li[role="option"][aria-selected="true"],
+  div[data-baseweb="option"]:hover,
+  div[data-baseweb="option"][aria-selected="true"] {
+    background: #c9a227 !important;
+    color: #111 !important;
+  }
   .ss-brand {
     display: flex;
     align-items: center;
@@ -857,7 +884,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.5 • Auto Log • Weather • Predict</p>
+    <p>v2.7.6 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -974,14 +1001,6 @@ if st.session_state.user_name is None:
 if not st.session_state.data_loaded:
     with st.spinner("🔥 Warming up the tires..."):
         load_data_from_sheet()
-
-u1, u2 = st.columns([3, 1])
-with u1:
-    st.caption(st.session_state.user_name + (" · Admin" if st.session_state.is_admin else ""))
-with u2:
-    if st.button("Log out", use_container_width=True):
-        clear_login(cookies)
-        st.rerun()
 
 with st.sidebar:
     st.write(f"**User:** {st.session_state.user_name}")
@@ -1110,6 +1129,7 @@ notes=
                             "id": str(datetime.now().timestamp()),
                             "user": st.session_state.user_name,
                             "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
+                            "time": data.get("time", ""),
                             "track": data.get("track", "Unknown"),
                             "vehicle": data.get("vehicle", profile_name or car_number or "Main Car"),
                             "profile_id": selected_profile_id,
@@ -1306,24 +1326,63 @@ if st.session_state.nav == "Predict":
 
 # ====================== HISTORY ======================
 if st.session_state.nav == "History":
-    st.subheader("History (Your Runs Only)" if not st.session_state.is_admin else "History (Admin – All Users)")
-    runs = st.session_state.runs
+    st.subheader("History")
+    runs = list(st.session_state.runs or [])
     if not runs:
         st.info("No runs found yet.")
     else:
-        vehicles = ["All Vehicles"] + sorted(list(set(r.get("vehicle", "Unknown") for r in runs)))
-        v_filter = st.selectbox("Filter by Vehicle", vehicles, key="hist_filter")
-        if v_filter != "All Vehicles":
-            runs = [r for r in runs if r.get("vehicle") == v_filter]
-        display = runs[-25:][::-1] if not st.session_state.show_all_history else runs[::-1]
-        st.caption(f"Showing {len(display)} runs")
-        if display:
-            df = pd.DataFrame(display)
-            cols = ["date", "user", "vehicle", "et", "sixty_ft", "three_thirty_ft", "eighth_et",
-                    "trap_mph", "temp_f", "humidity_pct", "altimeter_inhg", "density_altitude",
-                    "water_grains", "air_density_pct", "vapor_pressure", "track", "notes"]
-            available = [c for c in cols if c in df.columns]
-            st.dataframe(df[available], use_container_width=True)
+        profiles = st.session_state.car_profiles or []
+        palette = ["#17344a", "#3b2a12"]
+        color_for = {}
+        for i, p in enumerate(profiles[:2]):
+            color_for[str(p.get("id", ""))] = palette[i]
+            color_for[str(p.get("name", ""))] = palette[i]
+        extras = sorted({str(r.get("vehicle") or "") for r in runs if str(r.get("vehicle") or "") not in color_for})
+        for i, name in enumerate(extras):
+            color_for[name] = palette[i % 2]
+
+        def when_label(r):
+            d = str(r.get("date") or "")
+            t = str(r.get("time") or "")
+            if t and t not in d:
+                return f"{d} {t}".strip()
+            return d or "—"
+
+        def fmt(v, digits=None):
+            if v in [None, ""]:
+                return "—"
+            try:
+                n = float(v)
+                return f"{n:.{digits}f}" if digits is not None else str(v)
+            except Exception:
+                return str(v)
+
+        display = sorted(runs, key=lambda r: str(r.get("date") or ""), reverse=True)[:40]
+        st.caption("Shades split your two profiles. Tap a run for weather and notes.")
+        for r in display:
+            shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#222"))
+            title = (
+                f"{when_label(r)}  ·  60 {fmt(r.get('sixty_ft'), 3)}  ·  "
+                f"330 {fmt(r.get('three_thirty_ft'), 3)}  ·  ET {fmt(r.get('et'), 3)}  ·  "
+                f"{fmt(r.get('trap_mph'), 1)}"
+            )
+            st.markdown(
+                f"<div style='background:{shade};border-radius:12px;padding:2px 8px;margin-bottom:6px;'>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(title):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("60'", fmt(r.get("sixty_ft"), 3))
+                c2.metric("330'", fmt(r.get("three_thirty_ft"), 3))
+                c3.metric("DA", fmt(r.get("density_altitude"), 0))
+                st.write(
+                    f"Temp {fmt(r.get('temp_f'), 1)}°F · "
+                    f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
+                    f"Baro {fmt(r.get('altimeter_inhg'), 2)}"
+                )
+                if r.get("notes"):
+                    st.write(r.get("notes"))
+            st.markdown("</div>", unsafe_allow_html=True)
 
 # ====================== SETTINGS ======================
 if st.session_state.nav == "Settings":
@@ -1437,4 +1496,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.5")
+st.caption("Smart Slip v2.7.6")
