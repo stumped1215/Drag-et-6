@@ -345,7 +345,9 @@ def parse_import_block(block):
             try:
                 if k_lower in ["et", "sixty_ft", "eighth_et", "trap_mph", "reaction_time",
                                "temp_f", "altimeter_inhg", "humidity_pct", "density_altitude", "three_thirty_ft",
-                               "water_grains", "vapor_pressure", "sat_pressure", "air_density_pct", "air_density_lbft3"]:
+                               "water_grains", "vapor_pressure", "sat_pressure", "air_density_pct", "air_density_lbft3",
+                               "eighth_mph", "thousand_et", "mph_660", "660_mph",
+                               "dial", "mov"]:
                     data[k_lower] = float(v)
                 else:
                     data[k_lower] = v
@@ -360,12 +362,22 @@ def parse_import_block(block):
                 try:
                     if k.lower() in ["et", "sixty_ft", "eighth_et", "trap_mph", "reaction_time",
                                      "temp_f", "altimeter_inhg", "humidity_pct", "density_altitude", "three_thirty_ft",
-                                     "water_grains", "vapor_pressure", "sat_pressure", "air_density_pct", "air_density_lbft3"]:
+                                     "water_grains", "vapor_pressure", "sat_pressure", "air_density_pct", "air_density_lbft3",
+                                     "eighth_mph", "thousand_et", "mph_660", "660_mph",
+                                     "dial", "mov"]:
                         data[k.lower()] = float(v)
                     else:
                         data[k.lower()] = v
                 except:
                     data[k.lower()] = v
+    if data.get("eighth_mph") in [None, ""] and data.get("mph_660") not in [None, ""]:
+        data["eighth_mph"] = data.get("mph_660")
+    if data.get("eighth_mph") in [None, ""] and data.get("660_mph") not in [None, ""]:
+        data["eighth_mph"] = data.get("660_mph")
+    if data.get("thousand_et") in [None, ""] and data.get("et_1000") not in [None, ""]:
+        data["thousand_et"] = data.get("et_1000")
+    if data.get("thousand_et") in [None, ""] and data.get("1000_et") not in [None, ""]:
+        data["thousand_et"] = data.get("1000_et")
     return data
 
 def get_profile_by_id(profile_id):
@@ -537,7 +549,8 @@ def load_data_from_sheet():
             records = []
         runs = []
         for r in records:
-            for key in ["et", "sixty_ft", "three_thirty_ft", "eighth_et", "trap_mph",
+            for key in ["et", "sixty_ft", "three_thirty_ft", "eighth_et", "eighth_mph",
+                        "thousand_et", "trap_mph", "dial", "reaction_time", "mov",
                         "density_altitude", "temp_f", "altimeter_inhg", "humidity_pct",
                         "water_grains", "air_density_pct", "vapor_pressure"]:
                 if key in r and (r[key] == "" or r[key] is None):
@@ -584,13 +597,20 @@ def save_run_to_sheet(run: dict):
             ws = sheet.worksheet(WORKSHEET_RUNS)
         except:
             ws = sheet.add_worksheet(title=WORKSHEET_RUNS, rows=1000, cols=20)
-            headers = ["id", "user", "date", "track", "vehicle", "profile_id", "et",
-                       "sixty_ft", "three_thirty_ft", "eighth_et", "trap_mph",
+            headers = ["id", "user", "date", "time", "track", "vehicle", "profile_id",
+                       "dial", "reaction_time", "sixty_ft", "three_thirty_ft", "eighth_et",
+                       "eighth_mph", "thousand_et", "et", "trap_mph", "mov",
                        "density_altitude", "temp_f", "altimeter_inhg", "humidity_pct",
                        "water_grains", "air_density_pct", "vapor_pressure", "notes"]
             ws.append_row(headers)
         run["user"] = st.session_state.get("user_email") or st.session_state.user_name
         headers = ws.row_values(1)
+        needed = ["time", "eighth_mph", "thousand_et", "dial", "reaction_time", "mov"]
+        missing = [h for h in needed if h not in headers]
+        if missing:
+            for i, h in enumerate(missing):
+                ws.update_cell(1, len(headers) + 1 + i, h)
+            headers = ws.row_values(1)
         row = [run.get(h, "") if run.get(h) is not None else "" for h in headers]
         ws.append_row(row)
         return True
@@ -884,7 +904,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.7.6 • Auto Log • Weather • Predict</p>
+    <p>v2.7.8 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1061,17 +1081,24 @@ Identify the drag strip / track name from the slip header if shown (example: NUM
 Output ONLY key=value lines, one per line. No extra text.
 If a value is missing write key=None
 
+If a value is not on the slip, leave that key blank or None. Do not invent zeros.
+dial is the dial-in. reaction_time is R/T. eighth_et / eighth_mph are 1/8 or 660'. thousand_et is 1000' ET. et is 1/4 ET. trap_mph is 1/4 MPH. mov is margin of victory.
+
 Required fields:
 date=
 time=
 track=
 vehicle=
-et=
+dial=
+reaction_time=
 sixty_ft=
 three_thirty_ft=
 eighth_et=
+eighth_mph=
+thousand_et=
+et=
 trap_mph=
-reaction_time=
+mov=
 temp_f=
 altimeter_inhg=
 humidity_pct=
@@ -1085,8 +1112,8 @@ notes=
                 else:
                     st.code(result, language="text")
                     data = parse_import_block(result)
-                    if "et" not in data:
-                        st.error("Could not find ET in Grok's response. Try a clearer photo.")
+                    if not data:
+                        st.error("Could not read the slip. Try a clearer photo.")
                     else:
                         # Look up weather for the track + time on the slip
                         track_name = data.get("track") or "Numidia Dragway"
@@ -1133,11 +1160,16 @@ notes=
                             "track": data.get("track", "Unknown"),
                             "vehicle": data.get("vehicle", profile_name or car_number or "Main Car"),
                             "profile_id": selected_profile_id,
-                            "et": data["et"],
+                            "dial": data.get("dial"),
+                            "reaction_time": data.get("reaction_time"),
+                            "et": data.get("et"),
                             "sixty_ft": data.get("sixty_ft"),
                             "three_thirty_ft": data.get("three_thirty_ft"),
                             "eighth_et": data.get("eighth_et"),
+                            "eighth_mph": data.get("eighth_mph"),
+                            "thousand_et": data.get("thousand_et"),
                             "trap_mph": data.get("trap_mph"),
+                            "mov": data.get("mov"),
                             "density_altitude": data.get("density_altitude"),
                             "temp_f": data.get("temp_f"),
                             "altimeter_inhg": data.get("altimeter_inhg"),
@@ -1149,7 +1181,8 @@ notes=
                         }
                         st.session_state.runs.append(new_run)
                         if save_run_to_sheet(new_run):
-                            st.success(f"Run saved! ET {new_run['et']:.3f}s")
+                            et_s = f" ET {new_run['et']:.3f}s" if new_run.get("et") not in [None, ""] else ""
+                            st.success(f"Run saved.{et_s}")
                         else:
                             st.warning("Saved locally only.")
                         st.rerun()
@@ -1168,99 +1201,73 @@ if st.session_state.nav == "Manual Log":
         vehicle_name = "Main Car"
         st.warning("Create a Car Profile in Settings first.")
     st.write(f"**Vehicle:** {vehicle_name}")
-    track = st.selectbox("Drag Strip", list(TRACKS.keys()), key="manual_track")
-    track_info = TRACKS.get(track, TRACKS["Other / Custom"])
-    default_icao = track_info["icao"]
-    elevation = track_info["elevation"]
+    track = st.text_input("Track", key="manual_track")
     st.markdown("**Weather**")
-    icao = st.text_input("Airport ICAO (auto from track)", value=default_icao, key="manual_icao")
-    cwx1, cwx2 = st.columns(2)
-    with cwx1:
-        pull_metar = st.button("Pull Airport Weather", key="manual_pull_wx")
-    with cwx2:
-        pull_grok_wx = st.button("Grok Track Weather", key="manual_grok_wx")
-    if pull_metar:
-        wx = fetch_weather(icao)
-        if wx:
-            st.session_state.manual_temp_val = wx.get("temp_f", 75.0)
-            st.session_state.manual_altim_val = wx.get("altimeter_inhg", 29.92)
-            st.session_state.manual_hum_val = wx.get("humidity_pct", 50)
-            st.session_state.manual_grains_val = wx.get("water_grains")
-            st.success(f"Airport {icao}: {wx.get('temp_f')}°F / {wx.get('humidity_pct')}% / {wx.get('altimeter_inhg')} inHg / {wx.get('water_grains')} grains")
-            st.rerun()
-        else:
-            st.error(f"Could not get weather for {icao}.")
-    if pull_grok_wx:
-        with st.spinner("🌤 Grok is searching track weather..."):
-            wx_text, wx_err = grok_lookup_weather(track)
-        if wx_text:
-            wx = parse_import_block(wx_text)
-            if wx.get("temp_f"):
-                st.session_state.manual_temp_val = wx.get("temp_f")
-            if wx.get("altimeter_inhg"):
-                st.session_state.manual_altim_val = wx.get("altimeter_inhg")
-            if wx.get("humidity_pct"):
-                st.session_state.manual_hum_val = wx.get("humidity_pct")
-            st.success("Grok weather loaded")
-            st.code(wx_text, language="text")
-            st.rerun()
-        else:
-            st.error(wx_err or "Grok weather lookup failed")
     c1, c2, c3 = st.columns(3)
     with c1:
-        temp_f = st.number_input("Temp °F", value=st.session_state.get("manual_temp_val", 75.0), step=0.5, key="manual_temp")
+        temp_f = st.number_input("Temp °F", value=None, step=0.5, key="manual_temp")
     with c2:
-        altim = st.number_input("Barometer (inHg)", value=st.session_state.get("manual_altim_val", 29.92), step=0.01, format="%.2f", key="manual_altim")
+        altim = st.number_input("Barometer (inHg)", value=None, step=0.01, format="%.2f", key="manual_altim")
     with c3:
-        humidity = st.number_input("Humidity %", value=st.session_state.get("manual_hum_val", 50), key="manual_humidity")
-    wx_calc = calculate_weather(temp_f, altim, humidity, elevation)
-    da = wx_calc.get("density_altitude")
-    grains = wx_calc.get("water_grains")
-    air_pct = wx_calc.get("air_density_pct")
-    vapor = wx_calc.get("vapor_pressure")
-    st.caption(f"**DA {da} ft** | **Grains {grains}** | **Air dens {air_pct}%** | **Vapor {vapor} inHg** | Elev {elevation} ft")
-    st.markdown("**Timeslip Data**")
-    col1, col2 = st.columns(2)
-    with col1:
-        sixty = st.number_input("60 ft", value=0.0, step=0.001, format="%.3f", key="manual_sixty")
-        three_thirty = st.number_input("330 ft", value=0.0, step=0.001, format="%.3f", key="manual_330")
-        eighth = st.number_input("1/8 ET", value=0.0, step=0.001, format="%.3f", key="manual_eighth")
-    with col2:
-        trap = st.number_input("Trap MPH", value=0.0, step=0.1, key="manual_trap")
-        et = st.number_input("ET", value=10.0, step=0.001, format="%.3f", key="manual_et")
-    st.info("Put spinning, lifting, braking details in Notes.")
+        humidity = st.number_input("Humidity %", value=None, key="manual_humidity")
+    wx_calc = {}
+    if temp_f not in [None, ""] and altim not in [None, ""]:
+        wx_calc = calculate_weather(temp_f, altim, humidity if humidity not in [None, ""] else 50, 400)
+    da_in = st.number_input("Density altitude (ft)", value=None, step=1.0, key="manual_da")
+    grains_in = st.number_input("Water grains", value=None, step=0.1, key="manual_grains")
+    air_in = st.number_input("Air density %", value=None, step=0.01, key="manual_air")
+    vapor_in = st.number_input("Vapor pressure", value=None, step=0.001, format="%.3f", key="manual_vapor")
+    da = da_in if da_in not in [None, ""] else wx_calc.get("density_altitude")
+    grains = grains_in if grains_in not in [None, ""] else wx_calc.get("water_grains")
+    air_pct = air_in if air_in not in [None, ""] else wx_calc.get("air_density_pct")
+    vapor = vapor_in if vapor_in not in [None, ""] else wx_calc.get("vapor_pressure")
+    st.markdown("**Timeslip**")
+    dial = st.number_input("Dial", value=None, step=0.001, format="%.3f", key="manual_dial")
+    rt = st.number_input("R/T", value=None, step=0.001, format="%.3f", key="manual_rt")
+    sixty = st.number_input("60'", value=None, step=0.001, format="%.3f", key="manual_sixty")
+    three_thirty = st.number_input("330'", value=None, step=0.001, format="%.3f", key="manual_330")
+    eighth = st.number_input("1/8 ET", value=None, step=0.001, format="%.3f", key="manual_eighth")
+    eighth_mph = st.number_input("1/8 MPH", value=None, step=0.1, key="manual_eighth_mph")
+    thousand_et = st.number_input("1000'", value=None, step=0.001, format="%.3f", key="manual_1000")
+    et = st.number_input("1/4 ET", value=None, step=0.001, format="%.3f", key="manual_et")
+    trap = st.number_input("1/4 MPH", value=None, step=0.1, key="manual_trap")
+    mov = st.number_input("MOV", value=None, step=0.001, format="%.3f", key="manual_mov")
+    st.caption("Notes matter for spin, lift, brakes, nitrous.")
     notes = st.text_area("Notes", height=90, key="manual_notes")
     if st.button("Save Run", type="primary", use_container_width=True, key="manual_save"):
-        if et <= 0:
-            st.error("Enter a valid ET")
+        new_run = {
+            "id": str(datetime.now().timestamp()),
+            "user": st.session_state.user_name,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "time": datetime.now().strftime("%H:%M"),
+            "track": track,
+            "vehicle": vehicle_name,
+            "profile_id": selected_profile_id,
+            "dial": dial,
+            "reaction_time": rt,
+            "et": et,
+            "sixty_ft": sixty,
+            "three_thirty_ft": three_thirty,
+            "eighth_et": eighth,
+            "eighth_mph": eighth_mph,
+            "thousand_et": thousand_et,
+            "trap_mph": trap,
+            "mov": mov,
+            "density_altitude": da,
+            "temp_f": temp_f,
+            "altimeter_inhg": altim,
+            "humidity_pct": humidity,
+            "water_grains": grains,
+            "air_density_pct": air_pct,
+            "vapor_pressure": vapor,
+            "notes": notes
+        }
+        st.session_state.runs.append(new_run)
+        if save_run_to_sheet(new_run):
+            st.success("Run saved!")
         else:
-            new_run = {
-                "id": str(datetime.now().timestamp()),
-                "user": st.session_state.user_name,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "track": track,
-                "vehicle": vehicle_name,
-                "profile_id": selected_profile_id,
-                "et": et,
-                "sixty_ft": sixty if sixty > 0 else None,
-                "three_thirty_ft": three_thirty if three_thirty > 0 else None,
-                "eighth_et": eighth if eighth > 0 else None,
-                "trap_mph": trap if trap > 0 else None,
-                "density_altitude": da,
-                "temp_f": temp_f,
-                "altimeter_inhg": altim,
-                "humidity_pct": humidity,
-                "water_grains": grains,
-                "air_density_pct": air_pct,
-                "vapor_pressure": vapor,
-                "notes": notes
-            }
-            st.session_state.runs.append(new_run)
-            if save_run_to_sheet(new_run):
-                st.success("Run saved!")
-            else:
-                st.warning("Saved locally only.")
-            st.rerun()
+            st.warning("Saved locally only.")
+        st.rerun()
 
 # ====================== PREDICT + GROK ======================
 if st.session_state.nav == "Predict":
@@ -1303,10 +1310,20 @@ if st.session_state.nav == "Predict":
                 prompt = f"You are helping with bracket racing predictions for {selected_vehicle} (user: {st.session_state.user_name}).\n\n"
                 prompt += "Recent runs (keep cars and users completely separate):\n"
                 for r in recent:
-                    prompt += f"- {r.get('date')}: ET {r.get('et'):.3f}s @ {r.get('density_altitude', 'N/A')} ft DA"
+                    etv = r.get("et")
+                    et_txt = f"{float(etv):.3f}s" if etv not in [None, ""] else "—"
+                    prompt += f"- {r.get('date')}: ET {et_txt} @ {r.get('density_altitude', 'N/A')} ft DA"
+                    if r.get("dial"): prompt += f" | dial {r.get('dial')}"
+                    if r.get("reaction_time") not in [None, ""]: prompt += f" | RT {r.get('reaction_time')}"
+                    if r.get("mov") not in [None, ""]: prompt += f" | MOV {r.get('mov')}"
                     if r.get("sixty_ft"): prompt += f" | 60ft: {r['sixty_ft']}"
                     if r.get("three_thirty_ft"): prompt += f" | 330ft: {r['three_thirty_ft']}"
-                    if r.get("eighth_et"): prompt += f" | 1/8: {r['eighth_et']} @ {r.get('trap_mph', 'N/A')}"
+                    if r.get("eighth_et") or r.get("eighth_mph"):
+                        prompt += f" | 1/8: {r.get('eighth_et', 'N/A')} @ {r.get('eighth_mph', 'N/A')} mph"
+                    if r.get("thousand_et"):
+                        prompt += f" | 1000: {r.get('thousand_et')}"
+                    if r.get("trap_mph"):
+                        prompt += f" | trap: {r.get('trap_mph')} mph"
                     if r.get("notes"): prompt += f" | Notes: {r['notes']}"
                     prompt += "\n"
                 prompt += f"\nTrack: {pred_track}\n"
@@ -1361,24 +1378,38 @@ if st.session_state.nav == "History":
         st.caption("Shades split your two profiles. Tap a run for weather and notes.")
         for r in display:
             shade = color_for.get(str(r.get("profile_id") or ""), color_for.get(str(r.get("vehicle") or ""), "#222"))
-            title = (
-                f"{when_label(r)}  ·  60 {fmt(r.get('sixty_ft'), 3)}  ·  "
-                f"330 {fmt(r.get('three_thirty_ft'), 3)}  ·  ET {fmt(r.get('et'), 3)}  ·  "
-                f"{fmt(r.get('trap_mph'), 1)}"
-            )
+            if r.get("et") not in [None, ""]:
+                title = f"{when_label(r)}  ·  1/4 {fmt(r.get('et'), 3)} @ {fmt(r.get('trap_mph'), 1)}"
+            else:
+                title = f"{when_label(r)}  ·  1/8 {fmt(r.get('eighth_et'), 3)} @ {fmt(r.get('eighth_mph'), 1)}"
             st.markdown(
                 f"<div style='background:{shade};border-radius:12px;padding:2px 8px;margin-bottom:6px;'>",
                 unsafe_allow_html=True,
             )
             with st.expander(title):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("60'", fmt(r.get("sixty_ft"), 3))
-                c2.metric("330'", fmt(r.get("three_thirty_ft"), 3))
-                c3.metric("DA", fmt(r.get("density_altitude"), 0))
+                lines = [
+                    ("Dial", r.get("dial"), 3),
+                    ("R/T", r.get("reaction_time"), 3),
+                    ("60'", r.get("sixty_ft"), 3),
+                    ("330'", r.get("three_thirty_ft"), 3),
+                    ("1/8 ET", r.get("eighth_et"), 3),
+                    ("1/8 MPH", r.get("eighth_mph"), 1),
+                    ("1000'", r.get("thousand_et"), 3),
+                    ("1/4 ET", r.get("et"), 3),
+                    ("1/4 MPH", r.get("trap_mph"), 1),
+                    ("MOV", r.get("mov"), 3),
+                ]
+                shown = [f"**{lab}:** {fmt(val, dig)}" for lab, val, dig in lines if val not in [None, ""]]
+                if shown:
+                    st.markdown("  \n".join(shown))
                 st.write(
                     f"Temp {fmt(r.get('temp_f'), 1)}°F · "
                     f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
-                    f"Baro {fmt(r.get('altimeter_inhg'), 2)}"
+                    f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
+                    f"DA {fmt(r.get('density_altitude'), 0)} · "
+                    f"Grains {fmt(r.get('water_grains'), 1)} · "
+                    f"Air {fmt(r.get('air_density_pct'), 2)}% · "
+                    f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
                 )
                 if r.get("notes"):
                     st.write(r.get("notes"))
@@ -1496,4 +1527,4 @@ SMTP_FROM = "you@gmail.com"
                     st.error(f"Sheet error: {e}")
 
 st.divider()
-st.caption("Smart Slip v2.7.6")
+st.caption("Smart Slip v2.7.8")
