@@ -295,6 +295,21 @@ if "grok_prediction" not in st.session_state:
     st.session_state.grok_prediction = None
 
 # Known tracks: name -> nearest METAR airport + elevation
+try:
+    from tracks_library import TRACK_LIBRARY, track_names, suggest_tracks, find_track, geocode_track, match_track_from_slip
+except Exception:
+    TRACK_LIBRARY = []
+    def track_names():
+        return []
+    def suggest_tracks(query, limit=6):
+        return []
+    def find_track(query):
+        return None
+    def geocode_track(city, region, cache=None):
+        return (None, None)
+    def match_track_from_slip(raw):
+        return None
+
 TRACKS = {
     "Numidia Dragway": {"icao": "KSEG", "elevation": 850, "state": "PA"},
     "Maple Grove Raceway": {"icao": "KRDG", "elevation": 280, "state": "PA"},
@@ -442,6 +457,114 @@ def fetch_weather(icao):
     except Exception:
         pass
     return None
+
+def canonicalize_track(name):
+    matched = match_track_from_slip(name)
+    if matched:
+        return matched
+    rec = find_track(name)
+    if rec:
+        return rec["name"]
+    return (name or "").strip()
+
+def render_track_picker(prefix: str):
+    catalog = set(track_names())
+    catalog.update(TRACKS.keys())
+    catalog.discard("Other / Custom")
+    catalog.update(st.session_state.get("saved_tracks") or [])
+    for r in st.session_state.get("runs") or []:
+        t = str(r.get("track") or "").strip()
+        if t and t.lower() not in ["unknown", "none"]:
+            catalog.add(t)
+    catalog = sorted(catalog)
+    last_track = st.session_state.get("last_pred_track") or "Numidia Dragway"
+    nonce_key = f"{prefix}_track_nonce"
+    virgin_key = f"{prefix}_track_virgin"
+    typed_key = f"{prefix}_track_typed"
+    if nonce_key not in st.session_state:
+        st.session_state[nonce_key] = 0
+    typed = st.text_input(
+        "Drag Strip",
+        value=last_track if st.session_state.get(virgin_key, True) else st.session_state.get(typed_key, last_track),
+        key=f"{prefix}_track_box_{st.session_state[nonce_key]}",
+    )
+    if (
+        st.session_state.get(virgin_key, True)
+        and last_track
+        and typed == last_track[:-1]
+    ):
+        st.session_state[virgin_key] = False
+        st.session_state[typed_key] = ""
+        st.session_state[nonce_key] += 1
+        st.rerun()
+    if typed != last_track:
+        st.session_state[virgin_key] = False
+    st.session_state[typed_key] = typed
+    pred_track = (typed or "").strip()
+    hits = suggest_tracks(pred_track, limit=6)
+    extra = [t for t in catalog if pred_track and pred_track.lower() in t.lower() and t.lower() != pred_track.lower()]
+    seen = {n for n, _ in hits}
+    for t in extra:
+        if t not in seen:
+            hits.append((t, t))
+        if len(hits) >= 6:
+            break
+    if hits:
+        labels = [lab for _, lab in hits]
+        pick = st.radio("Suggestions", labels, index=None, key=f"{prefix}_guess_{st.session_state[nonce_key]}")
+        if pick:
+            pred_track = next((n for n, lab in hits if lab == pick), pick)
+            st.session_state[typed_key] = pred_track
+            st.session_state.last_pred_track = pred_track
+            st.session_state[virgin_key] = False
+            st.session_state[nonce_key] += 1
+            st.rerun()
+    if pred_track:
+        saved = list(st.session_state.get("saved_tracks") or [])
+        if pred_track not in saved:
+            saved.append(pred_track)
+            st.session_state.saved_tracks = saved
+        st.session_state.last_pred_track = canonicalize_track(pred_track) or pred_track
+    return canonicalize_track(pred_track) or pred_track
+
+def fetch_weather_for_track(track_name):
+    rec = find_track(track_name)
+    if not rec:
+        return None
+    lat, lon = rec.get("lat"), rec.get("lon")
+    if lat is None or lon is None:
+        cache = st.session_state.setdefault("geo_cache", {})
+        lat, lon = geocode_track(rec["city"], rec["region"], cache)
+    if lat is None or lon is None:
+        return None
+    try:
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&current=temperature_2m,relative_humidity_2m,surface_pressure"
+            "&temperature_unit=fahrenheit&pressure_unit=inch_hg"
+        )
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return None
+        cur = (r.json() or {}).get("current") or {}
+        temp_f = cur.get("temperature_2m")
+        humidity = cur.get("relative_humidity_2m")
+        altim = cur.get("surface_pressure")
+        elev = rec.get("elev_ft") or 400
+        wx = {
+            "temp_f": temp_f,
+            "humidity_pct": humidity,
+            "altimeter_inhg": round(float(altim), 2) if altim is not None else None,
+            "track": rec["name"],
+            "address": rec["address"],
+            "weather_source": f"Open-Meteo {float(lat):.3f},{float(lon):.3f}",
+        }
+        extra = calculate_weather(wx["temp_f"], wx["altimeter_inhg"], wx["humidity_pct"] or 50, elev)
+        wx.update(extra)
+        return wx
+    except Exception:
+        return None
 
 def parse_import_block(block):
     data = {}
@@ -1207,7 +1330,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.17 • Auto Log • Weather • Predict</p>
+    <p>v2.8.23 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1421,7 +1544,7 @@ Rules:
 - Do not shift rows. 60' is the 60' row only.
 - Compulink DIAL is often blank. R/T is usually -0.2 to 0.999. 60' is usually 1.10 to 2.20. Never put a 1.5 in R/T.
 - If the slip is 1/8-mile only, leave et and trap_mph None.
-- Track name from the header. Date and time from the header.
+- Track name from the header exactly as printed (e.g. NUMIDIA DRAGWAY). Date and time from the header.
 - Output ONLY key=value lines.
 
 date=
@@ -1474,7 +1597,7 @@ notes=
                             "user": st.session_state.get("user_email") or st.session_state.user_name,
                             "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
                             "time": data.get("time", ""),
-                            "track": data.get("track", "Unknown"),
+                            "track": canonicalize_track(data.get("track")) or data.get("track") or "Unknown",
                             "vehicle": profile_name or "Main Car",
                             "profile_id": selected_profile_id,
                             "dial": data.get("dial"),
@@ -1508,6 +1631,8 @@ notes=
                             notice.markdown("<div class='ss-bad'>Already saved</div>", unsafe_allow_html=True)
                             st.error("That slip was already saved.")
                         else:
+                            if new_run.get("track") and new_run["track"] != "Unknown":
+                                st.session_state.last_pred_track = new_run["track"]
                             sheet_ok = save_run_to_sheet(new_run)
                             st.session_state.runs.append(new_run)
                             st.session_state.auto_last_fp = auto_fp
@@ -1534,7 +1659,7 @@ if st.session_state.nav == "Manual Log":
         selected_profile_id = None
         vehicle_name = "Main Car"
         st.warning("Create a Car Profile in Settings first.")
-    track = st.text_input("Track", key="manual_track")
+    track = render_track_picker("manual")
     st.markdown("**Weather**")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1630,36 +1755,27 @@ if st.session_state.nav == "Manual Log":
 # ====================== PREDICT + GROK ======================
 if st.session_state.nav == "Predict":
     st.subheader("Predict ET with Smart Slip")
-    all_vehicles = sorted(list(set(r.get("vehicle", "Unknown") for r in st.session_state.runs)))
-    if not all_vehicles:
-        st.info("No runs yet for your account.")
+    profiles = list(st.session_state.get("car_profiles") or [])[:2]
+    if not profiles:
+        st.info("Create a car profile in Settings first.")
     else:
-        selected_vehicle = st.selectbox("Select Vehicle", all_vehicles, key="pred_vehicle")
+        profile_opts = {str(p.get("id")): p.get("name") for p in profiles}
+        selected_pid = st.selectbox(
+            "Car",
+            list(profile_opts.keys()),
+            format_func=lambda i: profile_opts.get(i, i),
+            key="pred_vehicle",
+        )
+        selected_vehicle = profile_opts.get(selected_pid, "")
         vehicle_runs = [
             r for r in st.session_state.runs
-            if r.get("vehicle") == selected_vehicle
+            if (
+                str(r.get("profile_id") or "") == str(selected_pid)
+                or r.get("vehicle") == selected_vehicle
+            )
             and str(r.get("excluded") or "").lower() not in ["yes", "true", "1"]
         ]
-        names = set(TRACKS.keys())
-        names.discard("Other / Custom")
-        names.update(st.session_state.get("saved_tracks") or [])
-        for r in st.session_state.get("runs") or []:
-            t = str(r.get("track") or "").strip()
-            if t and t.lower() not in ["unknown", "none"]:
-                names.add(t)
-        track_list = sorted(names) or ["Numidia Dragway"]
-        pred_track = st.selectbox(
-            "Drag Strip",
-            track_list,
-            index=0,
-            accept_new_options=True,
-            key="pred_track",
-        )
-        if pred_track:
-            saved = list(st.session_state.get("saved_tracks") or [])
-            if pred_track not in saved:
-                saved.append(pred_track)
-                st.session_state.saved_tracks = saved
+        pred_track = render_track_picker("pred")
 
         if st.button("Ask Smart Slip for Prediction", type="primary", use_container_width=True):
             if not get_xai_client():
@@ -1667,9 +1783,12 @@ if st.session_state.nav == "Predict":
             else:
                 recent = vehicle_runs[-6:]
                 wx_bits = ""
+                wx_err = None
                 with st.spinner("Pulling weather and dialing it in..."):
-                    wx_text, wx_err = grok_lookup_weather(pred_track)
-                    wx = parse_import_block(wx_text) if wx_text else {}
+                    wx = fetch_weather_for_track(pred_track) or {}
+                    if not wx:
+                        wx_text, wx_err = grok_lookup_weather(pred_track)
+                        wx = parse_import_block(wx_text) if wx_text else {}
                     if wx:
                         extra = {}
                         if wx.get("temp_f") and wx.get("altimeter_inhg"):
@@ -1678,8 +1797,9 @@ if st.session_state.nav == "Predict":
                                 wx.get("altimeter_inhg"),
                                 wx.get("humidity_pct", 50),
                             )
+                        loc = wx.get("address") or pred_track
                         wx_bits = (
-                            f"Temp {wx.get('temp_f', 'N/A')}°F | Humidity {wx.get('humidity_pct', 'N/A')}% | "
+                            f"{loc} | Temp {wx.get('temp_f', 'N/A')}°F | Humidity {wx.get('humidity_pct', 'N/A')}% | "
                             f"Barometer {wx.get('altimeter_inhg', 'N/A')} inHg | "
                             f"DA {wx.get('density_altitude') or extra.get('density_altitude') or 'N/A'} ft | "
                             f"Grains {wx.get('water_grains') or extra.get('water_grains') or 'N/A'} | "
@@ -2013,4 +2133,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.17")
+st.caption("Smart Slip v2.8.23")
