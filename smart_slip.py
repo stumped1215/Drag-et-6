@@ -468,15 +468,6 @@ def canonicalize_track(name):
     return (name or "").strip()
 
 def render_track_picker(prefix: str):
-    catalog = set(track_names())
-    catalog.update(TRACKS.keys())
-    catalog.discard("Other / Custom")
-    catalog.update(st.session_state.get("saved_tracks") or [])
-    for r in st.session_state.get("runs") or []:
-        t = str(r.get("track") or "").strip()
-        if t and t.lower() not in ["unknown", "none"]:
-            catalog.add(t)
-    catalog = sorted(catalog)
     last_track = st.session_state.get("last_pred_track") or "Numidia Dragway"
     nonce_key = f"{prefix}_track_nonce"
     virgin_key = f"{prefix}_track_virgin"
@@ -491,7 +482,8 @@ def render_track_picker(prefix: str):
     if (
         st.session_state.get(virgin_key, True)
         and last_track
-        and typed == last_track[:-1]
+        and typed != last_track
+        and last_track.startswith(typed)
     ):
         st.session_state[virgin_key] = False
         st.session_state[typed_key] = ""
@@ -501,17 +493,16 @@ def render_track_picker(prefix: str):
         st.session_state[virgin_key] = False
     st.session_state[typed_key] = typed
     pred_track = (typed or "").strip()
-    hits = suggest_tracks(pred_track, limit=6)
-    extra = [t for t in catalog if pred_track and pred_track.lower() in t.lower() and t.lower() != pred_track.lower()]
-    seen = {n for n, _ in hits}
-    for t in extra:
-        if t not in seen:
-            hits.append((t, t))
-        if len(hits) >= 6:
-            break
+    hits = suggest_tracks(pred_track, limit=8) if len(pred_track) >= 2 and pred_track.lower() != last_track.lower() else []
     if hits:
         labels = [lab for _, lab in hits]
-        pick = st.radio("Suggestions", labels, index=None, key=f"{prefix}_guess_{st.session_state[nonce_key]}")
+        pick = st.selectbox(
+            "Matches",
+            labels,
+            index=None,
+            placeholder="Tap a match",
+            key=f"{prefix}_dd_{st.session_state[nonce_key]}_{pred_track.lower()}",
+        )
         if pick:
             pred_track = next((n for n, lab in hits if lab == pick), pick)
             st.session_state[typed_key] = pred_track
@@ -1330,7 +1321,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.23 • Auto Log • Weather • Predict</p>
+    <p>v2.8.24 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2133,4 +2124,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.23")
+st.caption("Smart Slip v2.8.24")
