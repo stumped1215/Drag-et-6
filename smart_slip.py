@@ -1635,12 +1635,17 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.39 • Auto Log • Weather • Predict</p>
+    <p>v2.8.41 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 cookies = None
+if COOKIE_AVAILABLE:
+    try:
+        cookies = CookieManager(key="ss_cookie_mgr")
+    except Exception:
+        cookies = None
 
 def _restore_from_saved(saved):
     if not isinstance(saved, str) or "|" not in saved:
@@ -1661,21 +1666,37 @@ if st.session_state.user_name is None:
         cookie_auth = st.context.cookies.get("smartslip_auth", "") or ""
     except Exception:
         cookie_auth = ""
+    if not cookie_auth and cookies is not None:
+        try:
+            cookie_auth = cookies.get("smartslip_auth") or ""
+        except Exception:
+            cookie_auth = ""
     if _restore_from_saved(cookie_auth):
         st.rerun()
+
+if st.session_state.get("auth_persist") and cookies is not None:
+    try:
+        cookies.set("smartslip_auth", st.session_state.auth_persist, expires_at=datetime.now() + timedelta(days=30))
+    except Exception:
+        pass
+if st.session_state.get("auth_clear") and cookies is not None:
+    try:
+        cookies.delete("smartslip_auth")
+    except Exception:
+        pass
 
 if JS_AVAILABLE:
     persist_js = """
     (function(){
       const v = %s;
-      localStorage.setItem('smartslip_auth', v);
+      try { localStorage.setItem('smartslip_auth', v); } catch(e) {}
       document.cookie = 'smartslip_auth=' + encodeURIComponent(v) + '; max-age=2592000; path=/; SameSite=Lax';
       return v;
     })();
     """
     clear_js = """
     (function(){
-      localStorage.removeItem('smartslip_auth');
+      try { localStorage.removeItem('smartslip_auth'); } catch(e) {}
       document.cookie = 'smartslip_auth=; max-age=0; path=/';
       return '';
     })();
@@ -1687,6 +1708,10 @@ if JS_AVAILABLE:
         st_javascript(persist_js % repr(st.session_state.auth_persist))
     elif st.session_state.user_name is None:
         saved = st_javascript("localStorage.getItem('smartslip_auth') || '';")
+        if saved is None and not st.session_state.get("auth_js_tried"):
+            st.session_state.auth_js_tried = True
+            st.caption("Signing you back in…")
+            st.stop()
         if _restore_from_saved(saved):
             st.rerun()
 
@@ -1885,6 +1910,11 @@ notes=
             st.rerun()
 
     auto_job = read_job(st.session_state.get("auto_job_id"))
+    if not auto_job:
+        auto_job = latest_user_job(
+            st.session_state.get("user_email") or st.session_state.get("user_name"),
+            "auto",
+        )
     if auto_job:
         stt = str(auto_job.get("status") or "")
         if stt == "running":
@@ -1892,6 +1922,10 @@ notes=
             time.sleep(2)
             st.rerun()
         elif stt == "done":
+            if st.session_state.get("auto_reloaded") != str(auto_job.get("id")):
+                st.session_state.data_loaded = False
+                load_data_from_sheet()
+                st.session_state.auto_reloaded = str(auto_job.get("id"))
             et_s = auto_job.get("result") or ""
             extra = auto_job.get("extra") or ""
             msg = "SAVED"
@@ -2236,27 +2270,30 @@ if st.session_state.nav == "Log Book":
             keep = [p for p in parts if p and not p.lower().startswith("wx:")]
             return " | ".join(keep)
 
-        def day_key(r):
-            return str(r.get("date") or "Unknown")
+        def folder_name(r):
+            pid = str(r.get("profile_id") or "")
+            for p in profiles:
+                if str(p.get("id")) == pid:
+                    return p.get("name") or str(r.get("vehicle") or "Car")
+            return str(r.get("vehicle") or "Car")
 
-        by_day = {}
+        def folder_key(r):
+            return (
+                str(r.get("date") or "Unknown"),
+                str(r.get("profile_id") or r.get("vehicle") or "car"),
+                str(r.get("track") or ""),
+            )
+
+        by_folder = {}
         for r in runs:
-            by_day.setdefault(day_key(r), []).append(r)
-        days = sorted(by_day.keys(), reverse=True)
+            by_folder.setdefault(folder_key(r), []).append(r)
+        folders = sorted(by_folder.keys(), key=lambda k: (k[0], k[1], k[2]), reverse=True)
 
-        for day in days:
-            day_runs = sorted(by_day[day], key=lambda r: str(r.get("time") or ""), reverse=True)
-            names = []
-            for r in day_runs:
-                n = str(r.get("vehicle") or "").strip()
-                if n and n not in names:
-                    names.append(n)
-            tracks = []
-            for r in day_runs:
-                t = str(r.get("track") or "").strip()
-                if t and t not in tracks:
-                    tracks.append(t)
-            preview = " · ".join([p for p in [" / ".join(names), " / ".join(tracks), f"{len(day_runs)} runs"] if p])
+        for key in folders:
+            day_runs = sorted(by_folder[key], key=lambda r: str(r.get("time") or ""), reverse=True)
+            day, _, track = key
+            car = folder_name(day_runs[0])
+            preview = " · ".join([p for p in [car, track, f"{len(day_runs)} runs"] if p])
             with st.expander(f"{day} · {preview}", expanded=False):
                 grid = []
                 for r0 in day_runs:
@@ -2285,7 +2322,7 @@ if st.session_state.nav == "Log Book":
                     use_container_width=True,
                     on_select="rerun",
                     selection_mode="single-row",
-                    key=f"grid_{day}",
+                    key=f"grid_{day}_{key[1]}_{key[2]}",
                 )
                 picked_idx = []
                 try:
@@ -2482,4 +2519,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.39")
+st.caption("Smart Slip v2.8.41")
