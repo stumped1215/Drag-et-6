@@ -1704,7 +1704,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.46 • Auto Log • Weather • Predict</p>
+    <p>v2.8.47 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1988,8 +1988,8 @@ notes=
         stt = str(auto_job.get("status") or "")
         if stt == "running":
             wait_banner("SMART SLIP READING")
-            if st.button("Check if it's done", key="auto_check_job", use_container_width=True):
-                st.rerun()
+            time.sleep(2)
+            st.rerun()
         elif stt == "done":
             if st.session_state.get("auto_reloaded") != str(auto_job.get("id")):
                 st.session_state.data_loaded = False
@@ -2272,8 +2272,8 @@ Why: two short sentences max.
             pred_job = latest_user_job(st.session_state.get("user_email") or st.session_state.get("user_name"), "predict")
         if pred_job and str(pred_job.get("status")) == "running":
             wait_banner("SMART SLIP PREDICTING")
-            if st.button("Check if it's done", key="pred_check_job", use_container_width=True):
-                st.rerun()
+            time.sleep(2)
+            st.rerun()
         if pred_job and str(pred_job.get("status")) == "done" and pred_job.get("result"):
             st.session_state.grok_prediction = pred_job.get("result")
             st.session_state.pred_et_big = extract_predicted_et(pred_job.get("result"))
@@ -2588,4 +2588,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.46")
+st.caption("Smart Slip v2.8.47")
