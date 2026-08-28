@@ -161,6 +161,40 @@ st.markdown("""
     margin: 0;
     line-height: 1.1;
   }
+  .ss-wait, .ss-ok, .ss-bad {
+    text-align: center;
+    padding: 28px 16px;
+    border-radius: 16px;
+    margin: 8px 0 16px 0;
+    font-weight: 800;
+    letter-spacing: .04em;
+  }
+  .ss-wait {
+    background: #c9a227;
+    color: #111;
+    font-size: 1.35rem;
+    animation: ss-pulse 1.1s ease-in-out infinite;
+  }
+  .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
+  .ss-ok {
+    background: #1f9d55;
+    color: #fff;
+    font-size: 1.6rem;
+    animation: ss-flash 0.7s ease-out 2;
+  }
+  .ss-bad {
+    background: #b42318;
+    color: #fff;
+    font-size: 1.2rem;
+  }
+  @keyframes ss-pulse {
+    0%,100% { opacity: 1; }
+    50% { opacity: .72; }
+  }
+  @keyframes ss-flash {
+    0% { transform: scale(.96); background:#7dffb0; color:#111; }
+    100% { transform: scale(1); background:#1f9d55; color:#fff; }
+  }
   .ss-brand p {
     margin: 2px 0 0 0;
     opacity: 0.65;
@@ -422,7 +456,7 @@ def get_xai_api_key():
     except Exception:
         return None
 
-def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4"):
+def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6"):
     """Call Grok via xAI API. Supports optional image for vision."""
     client = get_xai_client()
     if client is None:
@@ -451,7 +485,7 @@ def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4"):
     except Exception as e:
         return None, str(e)
 
-def call_grok_with_search(prompt: str, model: str = "grok-4"):
+def call_grok_with_search(prompt: str, model: str = "grok-4-fast"):
     """Call Grok with web search so it can look up track weather."""
     api_key = get_xai_api_key()
     if not api_key:
@@ -471,8 +505,7 @@ def call_grok_with_search(prompt: str, model: str = "grok-4"):
             timeout=60
         )
         if r.status_code != 200:
-            # Fallback: chat completions without tools
-            text, err = call_grok(prompt, model=model)
+            text, err = call_grok(prompt, model="grok-4.6")
             return text, err
         data = r.json()
         # Responses API can return output in several shapes
@@ -491,7 +524,7 @@ def call_grok_with_search(prompt: str, model: str = "grok-4"):
             return "\n".join(chunks), None
         return json.dumps(data)[:2000], None
     except Exception as e:
-        text, err = call_grok(prompt, model=model)
+        text, err = call_grok(prompt, model="grok-4.6")
         if text:
             return text, None
         return None, str(e)
@@ -527,6 +560,51 @@ notes=
 If a value is unknown use None. Do not invent precise numbers if you cannot find them."""
     return call_grok_with_search(prompt)
 
+def fill_weather_for_run(run: dict) -> dict:
+    if run.get("temp_f") not in [None, ""] and run.get("altimeter_inhg") not in [None, ""]:
+        run["weather_pending"] = ""
+        return run
+    track = run.get("track") or "Numidia Dragway"
+    wx_text, _ = grok_lookup_weather(track, run.get("date"), run.get("time"))
+    if not wx_text:
+        return run
+    wx = parse_import_block(wx_text)
+    for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
+              "water_grains", "air_density_pct", "vapor_pressure"]:
+        if run.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
+            run[k] = wx[k]
+    if run.get("temp_f") and run.get("altimeter_inhg"):
+        extra = calculate_weather(run.get("temp_f"), run.get("altimeter_inhg"), run.get("humidity_pct", 50))
+        for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
+            if not run.get(k) and extra.get(k) is not None:
+                run[k] = extra.get(k)
+    run["weather_pending"] = ""
+    update_run_in_sheet(run)
+    return run
+
+def process_pending_weather():
+    if st.session_state.get("wx_busy"):
+        return
+    queue = list(st.session_state.get("wx_queue") or [])
+    if not queue:
+        for r in st.session_state.get("runs") or []:
+            if str(r.get("weather_pending") or "").lower() in ["yes", "1", "true"]:
+                if r.get("id"):
+                    queue.append(r.get("id"))
+                    break
+    if not queue:
+        return
+    rid = queue[0]
+    run = next((x for x in st.session_state.runs if str(x.get("id")) == str(rid)), None)
+    st.session_state.wx_busy = True
+    try:
+        if run:
+            fill_weather_for_run(run)
+    except Exception:
+        pass
+    st.session_state.wx_busy = False
+    st.session_state.wx_queue = [x for x in queue[1:] if str(x) != str(rid)]
+
 # ====================== GOOGLE SHEETS ======================
 def get_gspread_client():
     if not GSPREAD_AVAILABLE:
@@ -548,7 +626,7 @@ RUN_HEADERS = [
     "dial", "reaction_time", "sixty_ft", "three_thirty_ft", "eighth_et",
     "eighth_mph", "thousand_et", "et", "trap_mph", "mov",
     "density_altitude", "temp_f", "altimeter_inhg", "humidity_pct",
-    "water_grains", "air_density_pct", "vapor_pressure", "notes", "excluded"
+    "water_grains", "air_density_pct", "vapor_pressure", "notes", "excluded", "weather_pending"
 ]
 
 def _lower_row(r: dict) -> dict:
@@ -1060,7 +1138,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.11 • Auto Log • Weather • Predict</p>
+    <p>v2.8.16 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1177,6 +1255,7 @@ if st.session_state.user_name is None:
 if not st.session_state.data_loaded:
     with st.spinner("🔥 Warming up the tires..."):
         load_data_from_sheet()
+process_pending_weather()
 
 with st.sidebar:
     st.write(f"**User:** {st.session_state.user_name}")
@@ -1241,31 +1320,41 @@ if st.session_state.nav == "Auto Log":
         elif not get_xai_client():
             st.error("Smart Slip is not connected. Add `XAI_API_KEY` to Streamlit Secrets.")
         else:
-            with st.spinner("🏁 Reading the timeslip..."):
+            notice = st.empty()
+            notice.markdown(
+                "<div class='ss-wait'>SMART SLIP READING<span>Do not leave this page</span></div>",
+                unsafe_allow_html=True,
+            )
+            with st.spinner("Reading the timeslip..."):
                 img_bytes = uploaded.read()
-                prompt = f"""Read this Compulink timeslip photo.
+                prompt = f"""Read this drag timeslip photo. Use ONLY the side/column for car number {car_number or 'the entered car'}.
 
-Use ONLY the column for car number {car_number or 'the entered car'}.
-LEFT and RIGHT are two cars. Match Car # on that side (example: 1215 is LEFT, N199 is RIGHT).
+Layouts you will see:
+1) Compulink: labels on the left, LEFT numbers, RIGHT numbers. Match Car # to LEFT or RIGHT.
+2) Portatree / TSI / Accutime: LEFT numbers | center label | RIGHT numbers. Match Entry #, Car #, LEFT:115, RIGHT:117, etc.
+3) Two stacked blocks labeled LEFT LANE and RIGHT LANE, each with its own labels.
 
-Row order on these slips is ALWAYS:
-- DIAL
-- R/T
-- 60'     -> sixty_ft   (this is about 1.2 to 1.8 for a door car, NEVER 4+ seconds)
-- 330     -> three_thirty_ft
-- 1/8     -> eighth_et
-- MPH     (the MPH directly under 1/8) -> eighth_mph
-- 1000    -> thousand_et
-- 1/4     -> et
-- MPH     (the MPH directly under 1/4) -> trap_mph
+Field map:
+- DIAL / DIAL-IN -> dial
+- R/T / RT / REACTION -> reaction_time
+- 60' / 60FT / 60 Foot / 60 ft -> sixty_ft
+- 330 / 330' / 330 Foot / 330 FT -> three_thirty_ft
+- 1/8 / 1/8mi / 1/8 Mile / 1/8 ET -> eighth_et
+- MPH under 1/8, or MPH 1/8 / 1/8 Mile MPH / 1/8 MPH -> eighth_mph
+- 1000 / 1000FT / 1000Foot / 1000 ET -> thousand_et
+- 1/4 / 1/4 ET / finish ET -> et
+- MPH under 1/4, or 1/4 MPH / bottom MPH -> trap_mph
+- FINISH MARGIN / MOV / FIRST -> mov
+- Extra splits like ET @ 594 FT go in notes, not eighth_et.
 
-Do not shift rows. 60' is not 330. 330 is not 1/8.
-If a value is missing use None. Do not invent zeros.
+Rules:
+- NONE, blank, or missing = None. Do not write 0.
+- Do not shift rows. 60' is the 60' row only.
+- Compulink DIAL is often blank. R/T is usually -0.2 to 0.999. 60' is usually 1.10 to 2.20. Never put a 1.5 in R/T.
+- If the slip is 1/8-mile only, leave et and trap_mph None.
+- Track name from the header. Date and time from the header.
+- Output ONLY key=value lines.
 
-Track name is in the header (example: NUMIDIA DRAGWAY).
-date and time are at the top.
-
-Output ONLY key=value lines:
 date=
 time=
 track=
@@ -1283,22 +1372,26 @@ notes=
 """
                 result, err = call_grok(prompt, image_bytes=img_bytes)
                 if err:
+                    notice.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
                     st.error(f"Smart Slip error: {err}")
                 else:
                     data = parse_import_block(result)
                     if not data:
+                        notice.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
                         st.error("Could not read the slip. Try a clearer photo.")
                     else:
-                        try:
-                            s = data.get("sixty_ft")
-                            t330 = data.get("three_thirty_ft")
-                            e8 = data.get("eighth_et")
-                            if s not in [None, ""] and t330 not in [None, ""] and e8 in [None, ""] and float(s) > 2.8:
-                                data["eighth_et"] = t330
-                                data["three_thirty_ft"] = s
-                                data["sixty_ft"] = None
-                        except Exception:
-                            pass
+                        def _num(k):
+                            try:
+                                v = data.get(k)
+                                return None if v in [None, ""] else float(v)
+                            except Exception:
+                                return None
+                        dial_n, rt_n, s60_n = _num("dial"), _num("reaction_time"), _num("sixty_ft")
+                        if s60_n is None and rt_n is not None and 1.15 <= rt_n <= 2.40:
+                            if dial_n is None or 0.001 <= abs(dial_n) <= 0.999:
+                                data["sixty_ft"] = rt_n
+                                data["reaction_time"] = dial_n
+                                data["dial"] = None
                         profile_name = ""
                         if selected_profile_id:
                             p = get_profile_by_id(selected_profile_id)
@@ -1332,7 +1425,8 @@ notes=
                             "water_grains": data.get("water_grains"),
                             "air_density_pct": data.get("air_density_pct"),
                             "vapor_pressure": data.get("vapor_pressure"),
-                            "notes": final_notes
+                            "notes": final_notes,
+                            "weather_pending": "yes",
                         }
                         auto_fp = str({
                             "date": new_run.get("date"),
@@ -1342,38 +1436,20 @@ notes=
                             "profile_id": new_run.get("profile_id"),
                         })
                         if auto_fp == st.session_state.get("auto_last_fp"):
+                            notice.markdown("<div class='ss-bad'>Already saved</div>", unsafe_allow_html=True)
                             st.error("That slip was already saved.")
                         else:
                             sheet_ok = save_run_to_sheet(new_run)
                             st.session_state.runs.append(new_run)
                             st.session_state.auto_last_fp = auto_fp
-                            try:
-                                track_name = data.get("track") or "Numidia Dragway"
-                                wx_text, wx_err = grok_lookup_weather(
-                                    track_name, data.get("date"), data.get("time")
-                                )
-                                if wx_text:
-                                    wx = parse_import_block(wx_text)
-                                    for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
-                                              "water_grains", "air_density_pct", "vapor_pressure"]:
-                                        if new_run.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
-                                            new_run[k] = wx[k]
-                                    if new_run.get("temp_f") and new_run.get("altimeter_inhg"):
-                                        extra = calculate_weather(
-                                            new_run.get("temp_f"),
-                                            new_run.get("altimeter_inhg"),
-                                            new_run.get("humidity_pct", 50)
-                                        )
-                                        for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
-                                            if not new_run.get(k) and extra.get(k) is not None:
-                                                new_run[k] = extra.get(k)
-                                    update_run_in_sheet(new_run)
-                            except Exception:
-                                pass
+                            q = list(st.session_state.get("wx_queue") or [])
+                            q.append(new_run.get("id"))
+                            st.session_state.wx_queue = q
                             et_s = f" ET {float(new_run['et']):.3f}s" if new_run.get("et") not in [None, ""] else ""
                             if sheet_ok:
-                                st.success(f"Run saved.{et_s}")
+                                notice.markdown(f"<div class='ss-ok'>SAVED{et_s}</div>", unsafe_allow_html=True)
                             else:
+                                notice.markdown("<div class='ss-bad'>Slip read — sheet save failed</div>", unsafe_allow_html=True)
                                 st.error("Read the slip but could not save it to the Google Sheet.")
 
 # ====================== MANUAL LOG ======================
@@ -1846,4 +1922,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.11")
+st.caption("Smart Slip v2.8.16")
