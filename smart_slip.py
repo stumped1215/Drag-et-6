@@ -1039,6 +1039,16 @@ def _ensure_runs_ws(sheet):
         ws.update_cells(cells)
     return ws
 
+def _run_fingerprint(run: dict) -> str:
+    return "|".join([
+        str(run.get("user") or "").strip().lower(),
+        str(run.get("date") or "").strip(),
+        str(run.get("time") or "").strip(),
+        str(run.get("et") or "").strip(),
+        str(run.get("sixty_ft") or "").strip(),
+        str(run.get("profile_id") or "").strip(),
+    ])
+
 def save_run_to_sheet(run: dict):
     client = get_gspread_client()
     if client is None:
@@ -1047,15 +1057,32 @@ def save_run_to_sheet(run: dict):
     try:
         sheet = client.open(SHEET_NAME)
         ws = _ensure_runs_ws(sheet)
-        run["user"] = (st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
+        if not run.get("user"):
+            run["user"] = (st.session_state.get("user_email") or st.session_state.get("user_name") or "").strip()
         headers = [str(h).strip() for h in ws.row_values(1)]
+        records = ws.get_all_records()
+        fp = _run_fingerprint(run)
+        existing_idx = None
+        for i, rec in enumerate(records, start=2):
+            if run.get("id") and str(rec.get("id")) == str(run.get("id")):
+                existing_idx = i
+                break
+            if fp and _run_fingerprint(rec) == fp:
+                existing_idx = i
+                if not run.get("id"):
+                    run["id"] = rec.get("id")
+                break
         row = []
         for h in headers:
             val = run.get(h, run.get(h.lower(), ""))
             if val is None:
                 val = ""
             row.append(str(val))
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        if existing_idx:
+            for col, val in enumerate(row, start=1):
+                ws.update_cell(existing_idx, col, val)
+        else:
+            ws.append_row(row, value_input_option="USER_ENTERED")
         st.session_state.last_sheet_error = ""
         return True
     except Exception as e:
@@ -1608,7 +1635,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.38 • Auto Log • Weather • Predict</p>
+    <p>v2.8.39 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1782,7 +1809,13 @@ if st.session_state.nav == "Auto Log":
 
     notes = st.text_area("Additional Notes (spin / lift / brakes)", height=70, key="photo_notes")
 
-    if st.button("Extract with Smart Slip", type="primary", use_container_width=True):
+    auto_running = False
+    cur_auto = read_job(st.session_state.get("auto_job_id"))
+    if cur_auto and str(cur_auto.get("status")) == "running":
+        auto_running = True
+    if auto_running:
+        st.caption("A slip is already being read. Wait for it to finish.")
+    elif st.button("Extract with Smart Slip", type="primary", use_container_width=True):
         if not str(car_number or "").strip():
             st.error("Enter the car number before Smart Slip can read the slip.")
         elif not uploaded:
@@ -2449,4 +2482,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.38")
+st.caption("Smart Slip v2.8.39")
