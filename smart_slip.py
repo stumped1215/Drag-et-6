@@ -13,6 +13,8 @@ import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from typing import Optional
+import io
+from PIL import Image, ImageOps, ImageFilter
 
 try:
     from extra_streamlit_components import CookieManager
@@ -27,6 +29,13 @@ try:
 except ImportError:
     JS_AVAILABLE = False
     st_javascript = None
+
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    cv2 = None
 
 # Optional Google Sheets support
 try:
@@ -296,6 +305,66 @@ TRACKS = {
     "Lebanon Valley Dragway": {"icao": "KALB", "elevation": 600, "state": "NY"},
     "Other / Custom": {"icao": "KMDT", "elevation": 400, "state": ""}
 }
+
+def prepare_slip_image(img_bytes: bytes) -> bytes:
+    """Crop to the paper and straighten. Falls back to the original photo."""
+    if not img_bytes:
+        return img_bytes
+    try:
+        if CV2_AVAILABLE:
+            arr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                return img_bytes
+            h, w = img.shape[:2]
+            scale = 1200 / max(h, w)
+            if scale < 1:
+                img = cv2.resize(img, (int(w * scale), int(h * scale)))
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blur, 50, 150)
+            edges = cv2.dilate(edges, None, iterations=2)
+            cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:8]
+            quad = None
+            for c in cnts:
+                peri = cv2.arcLength(c, True)
+                approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+                if len(approx) == 4 and cv2.contourArea(approx) > 0.15 * img.shape[0] * img.shape[1]:
+                    quad = approx.reshape(4, 2).astype(np.float32)
+                    break
+            if quad is not None:
+                s = quad.sum(axis=1)
+                diff = np.diff(quad, axis=1)
+                ordered = np.zeros((4, 2), dtype=np.float32)
+                ordered[0] = quad[np.argmin(s)]
+                ordered[2] = quad[np.argmax(s)]
+                ordered[1] = quad[np.argmin(diff)]
+                ordered[3] = quad[np.argmax(diff)]
+                wA = np.linalg.norm(ordered[1] - ordered[0])
+                wB = np.linalg.norm(ordered[2] - ordered[3])
+                hA = np.linalg.norm(ordered[3] - ordered[0])
+                hB = np.linalg.norm(ordered[2] - ordered[1])
+                ww, hh = int(max(wA, wB)), int(max(hA, hB))
+                ww, hh = max(ww, 200), max(hh, 200)
+                dest = np.array([[0, 0], [ww - 1, 0], [ww - 1, hh - 1], [0, hh - 1]], dtype=np.float32)
+                M = cv2.getPerspectiveTransform(ordered, dest)
+                warped = cv2.warpPerspective(img, M, (ww, hh))
+                lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+                warped = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+                ok, buf = cv2.imencode(".jpg", warped, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                if ok:
+                    return buf.tobytes()
+        im = Image.open(io.BytesIO(img_bytes))
+        im = ImageOps.exif_transpose(im)
+        im = ImageOps.autocontrast(im, cutoff=2)
+        out = io.BytesIO()
+        im.convert("RGB").save(out, format="JPEG", quality=92)
+        return out.getvalue()
+    except Exception:
+        return img_bytes
 
 # ====================== HELPERS ======================
 def sat_vapor_pressure_hpa(temp_c):
@@ -1138,7 +1207,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.16 • Auto Log • Weather • Predict</p>
+    <p>v2.8.17 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1326,7 +1395,7 @@ if st.session_state.nav == "Auto Log":
                 unsafe_allow_html=True,
             )
             with st.spinner("Reading the timeslip..."):
-                img_bytes = uploaded.read()
+                img_bytes = prepare_slip_image(uploaded.read())
                 prompt = f"""Read this drag timeslip photo. Use ONLY the side/column for car number {car_number or 'the entered car'}.
 
 Layouts you will see:
@@ -1571,65 +1640,87 @@ if st.session_state.nav == "Predict":
             if r.get("vehicle") == selected_vehicle
             and str(r.get("excluded") or "").lower() not in ["yes", "true", "1"]
         ]
-        pred_track = st.selectbox("Drag Strip", list(TRACKS.keys()), key="pred_track")
-        pred_info = TRACKS.get(pred_track, TRACKS["Other / Custom"])
-        st.markdown("**Current Weather**")
-        icao = st.text_input("Airport ICAO (auto from track)", value=pred_info["icao"], key="pred_icao")
-        if st.button("Pull Current Weather", key="pred_wx"):
-            wx = fetch_weather(icao)
-            if wx:
-                st.session_state.pred_temp = wx.get("temp_f", 78)
-                st.session_state.pred_altim = wx.get("altimeter_inhg", 29.92)
-                st.session_state.pred_hum = wx.get("humidity_pct", 50)
-                st.success(f"Loaded from {icao}: {wx.get('temp_f')}°F / {wx.get('humidity_pct')}% / {wx.get('altimeter_inhg')} inHg / {wx.get('water_grains')} grains")
-                st.rerun()
-            else:
-                st.error(f"Could not get weather for {icao}. Check the ICAO code.")
-        temp = st.number_input("Temp °F", value=st.session_state.get("pred_temp", 78.0), step=0.5, key="pred_temp_input")
-        altim = st.number_input("Barometer (inHg)", value=st.session_state.get("pred_altim", 29.92), step=0.01, format="%.2f", key="pred_altim_input")
-        humidity = st.number_input("Humidity %", value=st.session_state.get("pred_hum", 50), key="pred_humidity_input")
-        wx_calc = calculate_weather(temp, altim, humidity, pred_info["elevation"])
-        target_da = wx_calc.get("density_altitude")
-        target_grains = wx_calc.get("water_grains")
-        target_air = wx_calc.get("air_density_pct")
-        target_vapor = wx_calc.get("vapor_pressure")
-        st.caption(f"**DA {target_da} ft** | **Grains {target_grains}** | **Air dens {target_air}%** | **Vapor {target_vapor} inHg**")
+        names = set(TRACKS.keys())
+        names.discard("Other / Custom")
+        names.update(st.session_state.get("saved_tracks") or [])
+        for r in st.session_state.get("runs") or []:
+            t = str(r.get("track") or "").strip()
+            if t and t.lower() not in ["unknown", "none"]:
+                names.add(t)
+        track_list = sorted(names) or ["Numidia Dragway"]
+        pred_track = st.selectbox(
+            "Drag Strip",
+            track_list,
+            index=0,
+            accept_new_options=True,
+            key="pred_track",
+        )
+        if pred_track:
+            saved = list(st.session_state.get("saved_tracks") or [])
+            if pred_track not in saved:
+                saved.append(pred_track)
+                st.session_state.saved_tracks = saved
 
         if st.button("Ask Smart Slip for Prediction", type="primary", use_container_width=True):
             if not get_xai_client():
                 st.error("Smart Slip is not connected. Add XAI_API_KEY to Streamlit Secrets first.")
             else:
                 recent = vehicle_runs[-6:]
-                prompt = f"You are helping with bracket racing predictions for {selected_vehicle} (user: {st.session_state.user_name}).\n\n"
-                prompt += "Recent runs (keep cars and users completely separate):\n"
-                for r in recent:
-                    etv = r.get("et")
-                    et_txt = f"{float(etv):.3f}s" if etv not in [None, ""] else "—"
-                    prompt += f"- {r.get('date')}: ET {et_txt} @ {r.get('density_altitude', 'N/A')} ft DA"
-                    if r.get("dial"): prompt += f" | dial {r.get('dial')}"
-                    if r.get("reaction_time") not in [None, ""]: prompt += f" | RT {r.get('reaction_time')}"
-                    if r.get("mov") not in [None, ""]: prompt += f" | MOV {r.get('mov')}"
-                    if r.get("sixty_ft"): prompt += f" | 60ft: {r['sixty_ft']}"
-                    if r.get("three_thirty_ft"): prompt += f" | 330ft: {r['three_thirty_ft']}"
-                    if r.get("eighth_et") or r.get("eighth_mph"):
-                        prompt += f" | 1/8: {r.get('eighth_et', 'N/A')} @ {r.get('eighth_mph', 'N/A')} mph"
-                    if r.get("thousand_et"):
-                        prompt += f" | 1000: {r.get('thousand_et')}"
-                    if r.get("trap_mph"):
-                        prompt += f" | trap: {r.get('trap_mph')} mph"
-                    if r.get("notes"): prompt += f" | Notes: {r['notes']}"
-                    prompt += "\n"
-                prompt += f"\nTrack: {pred_track}\n"
-                prompt += f"Target weather: Temp {temp}°F | Humidity {humidity}% | Barometer {altim} inHg | DA {target_da} ft | Water grains {target_grains} | Air density {target_air}% | Vapor pressure {target_vapor} inHg\n"
-                prompt += "Use temp, humidity, barometer, and water grains together. Do not mix cars or users.\n"
-                prompt += "\nGive a smart ET prediction with clear reasoning. Do not mix data from other cars or users."
-                with st.spinner("🔥 Dialing it in..."):
+                wx_bits = ""
+                with st.spinner("Pulling weather and dialing it in..."):
+                    wx_text, wx_err = grok_lookup_weather(pred_track)
+                    wx = parse_import_block(wx_text) if wx_text else {}
+                    if wx:
+                        extra = {}
+                        if wx.get("temp_f") and wx.get("altimeter_inhg"):
+                            extra = calculate_weather(
+                                wx.get("temp_f"),
+                                wx.get("altimeter_inhg"),
+                                wx.get("humidity_pct", 50),
+                            )
+                        wx_bits = (
+                            f"Temp {wx.get('temp_f', 'N/A')}°F | Humidity {wx.get('humidity_pct', 'N/A')}% | "
+                            f"Barometer {wx.get('altimeter_inhg', 'N/A')} inHg | "
+                            f"DA {wx.get('density_altitude') or extra.get('density_altitude') or 'N/A'} ft | "
+                            f"Grains {wx.get('water_grains') or extra.get('water_grains') or 'N/A'} | "
+                            f"Air density {wx.get('air_density_pct') or extra.get('air_density_pct') or 'N/A'}% | "
+                            f"Vapor {wx.get('vapor_pressure') or extra.get('vapor_pressure') or 'N/A'}"
+                        )
+                    prompt = f"You are helping with bracket racing predictions for {selected_vehicle} (user: {st.session_state.user_name}).\n\n"
+                    prompt += "Recent runs (keep cars and users completely separate):\n"
+                    for r in recent:
+                        etv = r.get("et")
+                        et_txt = f"{float(etv):.3f}s" if etv not in [None, ""] else "—"
+                        prompt += f"- {r.get('date')}: ET {et_txt} @ {r.get('density_altitude', 'N/A')} ft DA"
+                        if r.get("dial"): prompt += f" | dial {r.get('dial')}"
+                        if r.get("reaction_time") not in [None, ""]: prompt += f" | RT {r.get('reaction_time')}"
+                        if r.get("mov") not in [None, ""]: prompt += f" | MOV {r.get('mov')}"
+                        if r.get("sixty_ft"): prompt += f" | 60ft: {r['sixty_ft']}"
+                        if r.get("three_thirty_ft"): prompt += f" | 330ft: {r['three_thirty_ft']}"
+                        if r.get("eighth_et") or r.get("eighth_mph"):
+                            prompt += f" | 1/8: {r.get('eighth_et', 'N/A')} @ {r.get('eighth_mph', 'N/A')} mph"
+                        if r.get("thousand_et"):
+                            prompt += f" | 1000: {r.get('thousand_et')}"
+                        if r.get("trap_mph"):
+                            prompt += f" | trap: {r.get('trap_mph')} mph"
+                        if r.get("notes"): prompt += f" | Notes: {r['notes']}"
+                        prompt += "\n"
+                    prompt += f"\nTrack: {pred_track}\n"
+                    if wx_bits:
+                        prompt += f"Current track weather (just pulled): {wx_bits}\n"
+                    elif wx_err:
+                        prompt += "Weather lookup failed. Predict from run history only and say weather was unavailable.\n"
+                    prompt += "Use temp, humidity, barometer, and water grains together. Do not mix cars or users.\n"
+                    prompt += "\nGive a smart ET prediction with clear reasoning. Do not mix data from other cars or users."
                     result, err = call_grok(prompt)
                     if err:
                         st.error(err)
                     else:
                         st.session_state.grok_prediction = result
+                        st.session_state.pred_wx_used = wx_bits
                         st.success("Prediction ready")
+        if st.session_state.get("pred_wx_used"):
+            st.caption(st.session_state.pred_wx_used)
         if st.session_state.grok_prediction:
             st.markdown("### Prediction")
             st.write(st.session_state.grok_prediction)
@@ -1922,4 +2013,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.16")
+st.caption("Smart Slip v2.8.17")
