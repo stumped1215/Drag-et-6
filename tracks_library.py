@@ -258,14 +258,18 @@ def suggest_tracks(query, limit=6):
     q = (query or "").strip().lower()
     if len(q) < 2:
         return []
-    hits = []
+    starts, contains = [], []
     for name, city, region in TRACK_LIBRARY:
+        label = track_label(name, city, region)
         blob = f"{name} {city} {region}".lower()
-        if q in blob:
-            hits.append((name, track_label(name, city, region)))
-        if len(hits) >= limit:
+        if name.lower().startswith(q) or blob.startswith(q):
+            starts.append((name, label))
+        elif q in blob:
+            contains.append((name, label))
+        if len(starts) >= limit:
             break
-    return hits
+    out = starts + contains
+    return out[:limit]
 
 
 # Level 3: published / mapped starting-line coordinates (lat, lon, elev_ft or None).
