@@ -6,3 +6,5 @@ gspread
 google-auth
 openai
 streamlit-javascript
+opencv-python-headless
+pillow
