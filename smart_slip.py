@@ -918,7 +918,13 @@ def process_pending_weather():
     st.session_state.wx_queue = [x for x in queue[1:] if str(x) != str(rid)]
 
 # ====================== GOOGLE SHEETS ======================
+_GSP_CLIENT = None
+_GSP_SHEET = None
+
 def get_gspread_client():
+    global _GSP_CLIENT
+    if _GSP_CLIENT is not None:
+        return _GSP_CLIENT
     if not GSPREAD_AVAILABLE:
         return None
     try:
@@ -928,10 +934,25 @@ def get_gspread_client():
                 scopes=["https://www.googleapis.com/auth/spreadsheets",
                         "https://www.googleapis.com/auth/drive"]
             )
-            return gspread.authorize(creds)
+            _GSP_CLIENT = gspread.authorize(creds)
+            return _GSP_CLIENT
     except Exception as e:
         st.error(f"Google Sheets auth error: {e}")
     return None
+
+def get_spreadsheet():
+    global _GSP_SHEET
+    if _GSP_SHEET is not None:
+        return _GSP_SHEET
+    client = get_gspread_client()
+    if client is None:
+        return None
+    try:
+        _GSP_SHEET = client.open(SHEET_NAME)
+        return _GSP_SHEET
+    except Exception:
+        _GSP_SHEET = None
+        return None
 
 RUN_HEADERS = [
     "id", "user", "date", "time", "track", "vehicle", "profile_id",
@@ -1265,16 +1286,18 @@ def delete_profile_and_runs(profile: dict):
         return False
 
 def get_jobs_ws():
-    client = get_gspread_client()
-    if client is None:
-        return None
-    sheet = client.open(SHEET_NAME)
     try:
-        return sheet.worksheet(WORKSHEET_PREDICT)
+        sheet = get_spreadsheet()
+        if sheet is None:
+            return None
+        try:
+            return sheet.worksheet(WORKSHEET_PREDICT)
+        except Exception:
+            ws = sheet.add_worksheet(title=WORKSHEET_PREDICT, rows=400, cols=8)
+            ws.append_row(["id", "user", "kind", "status", "result", "error", "extra", "created"])
+            return ws
     except Exception:
-        ws = sheet.add_worksheet(title=WORKSHEET_PREDICT, rows=400, cols=8)
-        ws.append_row(["id", "user", "kind", "status", "result", "error", "extra", "created"])
-        return ws
+        return None
 
 def write_job(job_id, user, kind, status, result="", error="", extra=""):
     JOB_MEM = PRED_PROMPTS
@@ -1306,21 +1329,20 @@ def write_job(job_id, user, kind, status, result="", error="", extra=""):
 
 def read_job(job_id):
     if not job_id:
-        return PRED_PROMPTS.get(job_id)
-    if job_id in PRED_PROMPTS and PRED_PROMPTS[job_id].get("status") in ["done", "error", "running"]:
-        mem = PRED_PROMPTS[job_id]
-        if mem.get("status") != "running":
-            return mem
-    ws = get_jobs_ws()
-    if ws is None:
-        return PRED_PROMPTS.get(job_id)
+        return None
+    mem = PRED_PROMPTS.get(job_id)
+    if mem:
+        return mem
     try:
+        ws = get_jobs_ws()
+        if ws is None:
+            return None
         for rec in ws.get_all_records():
             if str(rec.get("id")) == str(job_id):
                 return rec
     except Exception:
         pass
-    return PRED_PROMPTS.get(job_id)
+    return None
 
 def latest_user_job(user, kind):
     user = str(user or "").strip().lower()
@@ -1635,7 +1657,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.41 • Auto Log • Weather • Predict</p>
+    <p>v2.8.43 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1919,8 +1941,8 @@ notes=
         stt = str(auto_job.get("status") or "")
         if stt == "running":
             wait_banner("SMART SLIP READING")
-            time.sleep(2)
-            st.rerun()
+            if st.button("Check if it's done", key="auto_check_job", use_container_width=True):
+                st.rerun()
         elif stt == "done":
             if st.session_state.get("auto_reloaded") != str(auto_job.get("id")):
                 st.session_state.data_loaded = False
@@ -2203,8 +2225,8 @@ Why: two short sentences max.
             pred_job = latest_user_job(st.session_state.get("user_email") or st.session_state.get("user_name"), "predict")
         if pred_job and str(pred_job.get("status")) == "running":
             wait_banner("SMART SLIP PREDICTING")
-            time.sleep(2)
-            st.rerun()
+            if st.button("Check if it's done", key="pred_check_job", use_container_width=True):
+                st.rerun()
         if pred_job and str(pred_job.get("status")) == "done" and pred_job.get("result"):
             st.session_state.grok_prediction = pred_job.get("result")
             st.session_state.pred_et_big = extract_predicted_et(pred_job.get("result"))
@@ -2519,4 +2541,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.41")
+st.caption("Smart Slip v2.8.43")
