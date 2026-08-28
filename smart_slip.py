@@ -981,20 +981,26 @@ def _user_idents():
         str(st.session_state.get("user_name") or "").strip().lower(),
     } - {""}
 
-def _row_belongs_to_user(r: dict) -> bool:
+def _row_belongs_to_user(r: dict, owned_pids=None, owned_names=None) -> bool:
     if st.session_state.is_admin:
         return True
     ident = _user_idents()
+    owned_pids = owned_pids or {str(p.get("id") or "") for p in (st.session_state.get("car_profiles") or [])} - {""}
+    owned_names = owned_names or {str(p.get("name") or "").strip().lower() for p in (st.session_state.get("car_profiles") or [])} - {""}
     u = str(r.get("user") or "").strip().lower()
     if u and u in ident:
         return True
-    if u and any(u == i or u.endswith(i) or i in u for i in ident):
+    if u and any(len(i) > 2 and (u == i or u.endswith(i) or i in u) for i in ident):
         return True
-    pid = str(r.get("profile_id") or "")
-    if pid:
-        for p in st.session_state.get("car_profiles") or []:
-            if str(p.get("id")) == pid:
-                return True
+    if u and u in owned_names:
+        return True
+    if str(r.get("profile_id") or "") in owned_pids:
+        return True
+    veh = str(r.get("vehicle") or "").strip().lower()
+    if veh and veh in owned_names:
+        return True
+    if veh and any(n and len(n) > 3 and (n in veh or veh in n) for n in owned_names):
+        return True
     return False
 
 def load_data_from_sheet():
@@ -1030,12 +1036,43 @@ def load_data_from_sheet():
             profiles = [_lower_row(p) for p in ws_profiles.get_all_records()]
         except Exception:
             profiles = []
+        ident = _user_idents()
         if not st.session_state.is_admin:
-            ident = _user_idents()
-            profiles = [p for p in profiles if str(p.get("user") or "").strip().lower() in ident]
+            owned_profiles = []
+            for p in profiles:
+                pu = str(p.get("user") or "").strip().lower()
+                if pu in ident or any(len(i) > 2 and (pu == i or i in pu or pu in i) for i in ident):
+                    owned_profiles.append(p)
+            owned_pids = {str(p.get("id") or "") for p in owned_profiles} - {""}
+            owned_names = {str(p.get("name") or "").strip().lower() for p in owned_profiles} - {""}
+            for r in runs:
+                ru = str(r.get("user") or "").strip().lower()
+                veh = str(r.get("vehicle") or "").strip().lower()
+                if ru in ident or (veh and veh in owned_names):
+                    if r.get("profile_id"):
+                        owned_pids.add(str(r.get("profile_id")))
+                    if veh:
+                        owned_names.add(veh)
+            for p in profiles:
+                if str(p.get("id") or "") in owned_pids:
+                    owned_names.add(str(p.get("name") or "").strip().lower())
+                    if p not in owned_profiles:
+                        owned_profiles.append(p)
+            profiles = owned_profiles
+            kept = [r for r in runs if _row_belongs_to_user(r, owned_pids, owned_names)]
+            owned_days = {
+                (str(r.get("date") or ""), str(r.get("track") or "").strip().lower())
+                for r in kept
+            }
+            for r in runs:
+                if r in kept:
+                    continue
+                ru = str(r.get("user") or "").strip().lower()
+                key = (str(r.get("date") or ""), str(r.get("track") or "").strip().lower())
+                if key in owned_days and (not ru or ru in owned_names or _row_belongs_to_user(r, owned_pids, owned_names)):
+                    kept.append(r)
+            runs = kept
         st.session_state.car_profiles = profiles
-        if not st.session_state.is_admin:
-            runs = [r for r in runs if _row_belongs_to_user(r)]
         st.session_state.runs = runs
         st.session_state.data_loaded = True
         return True
@@ -1667,7 +1704,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.44 • Auto Log • Weather • Predict</p>
+    <p>v2.8.46 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2551,4 +2588,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.44")
+st.caption("Smart Slip v2.8.46")
