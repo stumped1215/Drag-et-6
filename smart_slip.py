@@ -1707,7 +1707,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.49 • Auto Log • Weather • Predict</p>
+    <p>v2.8.50 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2436,8 +2436,23 @@ if st.session_state.nav == "Log Book":
                         f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
                     )
                     note = clean_notes(r.get("notes"))
-                    if note:
-                        st.write(note)
+                    edited_notes = st.text_area(
+                        "Notes (spin / lift / brakes)",
+                        value=note,
+                        key=f"notes_{r.get('id')}",
+                        height=80,
+                    )
+                    if st.button("Save notes", key=f"savenotes_{r.get('id')}", use_container_width=True):
+                        r["notes"] = (edited_notes or "").strip()
+                        for x in st.session_state.runs or []:
+                            if str(x.get("id")) == str(r.get("id")):
+                                x["notes"] = r["notes"]
+                                break
+                        ok = update_run_in_sheet(r)
+                        if ok:
+                            st.success("Notes saved.")
+                        else:
+                            st.error("Could not save notes to the sheet.")
                     excluded = str(r.get("excluded") or "").lower() in ["yes", "true", "1"]
                     if excluded:
                         st.caption("Excluded from predictions.")
@@ -2606,4 +2621,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.49")
+st.caption("Smart Slip v2.8.50")
