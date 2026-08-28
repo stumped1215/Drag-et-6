@@ -316,8 +316,9 @@ if "grok_prediction" not in st.session_state:
 
 # Known tracks: name -> nearest METAR airport + elevation
 try:
-    from tracks_library import TRACK_LIBRARY, track_names, suggest_tracks, find_track, geocode_track, match_track_from_slip
+    from tracks_library import TRACK_LIBRARY, track_names, suggest_tracks, find_track, geocode_track, match_track_from_slip, TRACK_ICAO
 except Exception:
+    TRACK_ICAO = {}
     TRACK_LIBRARY = []
     def track_names():
         return []
@@ -618,9 +619,17 @@ def fetch_weather_noaa(lat, lon):
 def fetch_weather_for_track(track_name):
     rec = find_track(track_name)
     if not rec:
-        return None
+        rec = {
+            "name": (track_name or "").strip() or "Unknown",
+            "city": (track_name or "").strip(),
+            "region": "",
+            "address": (track_name or "").strip(),
+            "lat": None, "lon": None, "elev_ft": 400, "icao": None,
+        }
     elev = rec.get("elev_ft") or 400
     icao = rec.get("icao")
+    if not icao and rec.get("name"):
+        icao = TRACK_ICAO.get(rec["name"].lower())
     if icao:
         metar = fetch_weather(icao)
         if metar:
@@ -900,10 +909,11 @@ def process_pending_weather():
     queue = list(st.session_state.get("wx_queue") or [])
     if not queue:
         for r in st.session_state.get("runs") or []:
-            if str(r.get("weather_pending") or "").lower() in ["yes", "1", "true"]:
-                if r.get("id"):
-                    queue.append(r.get("id"))
-                    break
+            pending = str(r.get("weather_pending") or "").lower() in ["yes", "1", "true"]
+            missing = r.get("temp_f") in [None, ""] and r.get("density_altitude") in [None, ""]
+            if (pending or missing) and r.get("id"):
+                queue.append(r.get("id"))
+                break
     if not queue:
         return
     rid = queue[0]
@@ -1657,7 +1667,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.43 • Auto Log • Weather • Predict</p>
+    <p>v2.8.44 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2541,4 +2551,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.43")
+st.caption("Smart Slip v2.8.44")
