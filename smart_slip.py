@@ -468,7 +468,12 @@ def canonicalize_track(name):
     return (name or "").strip()
 
 def render_track_picker(prefix: str):
-    last_track = st.session_state.get("last_pred_track") or "Numidia Dragway"
+    last_track = st.session_state.get("last_pred_track")
+    if last_track is None:
+        last_track = "Numidia Dragway"
+    nkey = f"{prefix}_track_n"
+    if nkey not in st.session_state:
+        st.session_state[nkey] = 0
     labels = {}
     names = []
     for name, city, region in TRACK_LIBRARY:
@@ -478,22 +483,20 @@ def render_track_picker(prefix: str):
         if extra and extra not in labels and extra != "Other / Custom":
             labels[extra] = extra
             names.append(extra)
-    options = []
     if last_track:
-        options.append(last_track)
         labels.setdefault(last_track, last_track)
-    for name in sorted(set(names)):
-        if name != last_track:
-            options.append(name)
+    options = sorted(set(names))
+    if last_track:
+        st.caption(f"Using **{last_track}**")
     picked = st.selectbox(
         "Drag Strip",
         options,
-        index=0 if last_track in options else None,
-        accept_new_options=True,
+        index=None,
+        placeholder="Tap to change track",
         format_func=lambda n: labels.get(n, n),
-        key=f"{prefix}_track_select",
+        key=f"{prefix}_track_select_{st.session_state[nkey]}",
     )
-    pred_track = canonicalize_track(picked) or (picked or "").strip()
+    pred_track = canonicalize_track(picked) or (picked or "").strip() or last_track
     if pred_track:
         saved = list(st.session_state.get("saved_tracks") or [])
         if pred_track not in saved:
@@ -1305,7 +1308,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.25 • Auto Log • Weather • Predict</p>
+    <p>v2.8.27 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2108,4 +2111,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.25")
+st.caption("Smart Slip v2.8.27")
