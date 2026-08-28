@@ -497,33 +497,89 @@ def rh_from_temp_dew(temp_c, dew_c):
     except Exception:
         return 50
 
-def fetch_weather(icao):
-    try:
-        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=3"
-        r = requests.get(url, timeout=8, headers={"User-Agent": "SmartSlip/2.8 (drag racing weather)"})
-        if r.status_code == 200:
-            data = r.json()
-            if data and len(data) > 0:
-                m = data[0]
-                temp_c = m.get("temp")
-                dew_c = m.get("dewp")
-                temp_f = round(temp_c * 9/5 + 32, 1) if temp_c is not None else None
-                altim = m.get("altim_in_hg")
-                if altim is None:
-                    altim = pressure_to_inhg(m.get("altim"))
-                if altim is None:
-                    raw = str(m.get("rawOb") or "")
-                    am = re.search(r"\bA(\d{4})\b", raw)
-                    if am:
-                        altim = round(int(am.group(1)) / 100.0, 2)
-                humidity = rh_from_temp_dew(temp_c, dew_c) if temp_c is not None and dew_c is not None else 50
-                wx = {"temp_f": temp_f, "altimeter_inhg": altim, "humidity_pct": humidity, "icao": icao}
-                extra = calculate_weather(temp_f, altim, humidity)
-                wx.update(extra)
-                return wx
-    except Exception:
-        pass
+def _parse_run_when(date_s, time_s):
+    raw = f"{date_s or ''} {time_s or ''}".strip()
+    if not raw:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %I:%M:%S %p",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %I:%M %p",
+        "%m/%d/%Y %I:%M:%S %p",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%b/%Y %I:%M:%S %p",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(raw.replace("  ", " ").strip(), fmt)
+        except Exception:
+            continue
     return None
+
+def _metar_obs_dt(m):
+    rt = m.get("reportTime") or m.get("receiptTime")
+    if rt:
+        try:
+            return datetime.fromisoformat(str(rt).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+    ot = m.get("obsTime")
+    if ot:
+        try:
+            ts = float(ot)
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return datetime.utcfromtimestamp(ts)
+        except Exception:
+            pass
+    return None
+
+def _wx_from_metar(m, icao, elev=400):
+    temp_c = m.get("temp")
+    dew_c = m.get("dewp")
+    temp_f = round(temp_c * 9/5 + 32, 1) if temp_c is not None else None
+    altim = m.get("altim_in_hg")
+    if altim is None:
+        altim = pressure_to_inhg(m.get("altim"))
+    if altim is None:
+        raw = str(m.get("rawOb") or "")
+        am = re.search(r"\bA(\d{4})\b", raw)
+        if am:
+            altim = round(int(am.group(1)) / 100.0, 2)
+    humidity = rh_from_temp_dew(temp_c, dew_c) if temp_c is not None and dew_c is not None else 50
+    wx = {"temp_f": temp_f, "altimeter_inhg": altim, "humidity_pct": humidity, "icao": icao}
+    extra = calculate_weather(temp_f, altim, humidity, elev)
+    wx.update(extra)
+    obs = _metar_obs_dt(m)
+    wx["weather_source"] = f"METAR {icao}" + (f" @ {obs.strftime('%H:%M')}Z" if obs else "")
+    return wx
+
+def fetch_weather(icao, when=None, elev=400):
+    try:
+        hours = 18 if when else 4
+        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours={hours}"
+        r = requests.get(url, timeout=8, headers={"User-Agent": "SmartSlip/2.8 (drag racing weather)"})
+        if r.status_code != 200:
+            return None
+        data = r.json() or []
+        if not data:
+            return None
+        m = data[0]
+        if when:
+            best, best_diff = data[0], None
+            for row in data:
+                odt = _metar_obs_dt(row)
+                if not odt:
+                    continue
+                diff = abs((odt - when).total_seconds())
+                if best_diff is None or diff < best_diff:
+                    best, best_diff = row, diff
+            m = best
+        wx = _wx_from_metar(m, icao, elev)
+        return wx if weather_looks_sane(wx) else None
+    except Exception:
+        return None
 
 def canonicalize_track(name):
     matched = match_track_from_slip(name)
@@ -616,7 +672,7 @@ def fetch_weather_noaa(lat, lon):
     except Exception:
         return None
 
-def fetch_weather_for_track(track_name):
+def fetch_weather_for_track(track_name, when=None):
     rec = find_track(track_name)
     if not rec:
         rec = {
@@ -629,71 +685,22 @@ def fetch_weather_for_track(track_name):
     elev = rec.get("elev_ft") or 400
     icao = rec.get("icao")
     if not icao and rec.get("name"):
-        icao = TRACK_ICAO.get(rec["name"].lower())
-    if icao:
-        metar = fetch_weather(icao)
-        if metar:
-            baro = pressure_to_inhg(metar.get("altimeter_inhg"))
-            if baro:
-                metar["altimeter_inhg"] = baro
-            extra = calculate_weather(
-                metar.get("temp_f"),
-                metar.get("altimeter_inhg"),
-                metar.get("humidity_pct") or 50,
-                elev,
-            )
-            metar.update(extra)
-            metar["track"] = rec["name"]
-            metar["address"] = rec.get("address")
-            metar["elev_ft"] = elev
-            metar["weather_source"] = f"METAR {icao}"
-            if weather_looks_sane(metar):
-                return metar
-    lat, lon = rec.get("lat"), rec.get("lon")
-    if lat is None or lon is None:
-        cache = st.session_state.setdefault("geo_cache", {})
-        lat, lon = geocode_track(rec["city"], rec["region"], cache)
-    if lat is None or lon is None:
+        icao = TRACK_ICAO.get(str(rec.get("name") or "").lower())
+    if not icao:
+        key = re.sub(r"[^a-z0-9]+", " ", str(track_name or "").lower()).strip()
+        for name, code in (TRACK_ICAO or {}).items():
+            if name in key or key in name:
+                icao = code
+                break
+    if not icao:
         return None
-    try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={lat}&longitude={lon}"
-            "&current=temperature_2m,relative_humidity_2m,pressure_msl,surface_pressure"
-            "&temperature_unit=fahrenheit"
-        )
-        r = requests.get(url, timeout=8)
-        if r.status_code == 200:
-            cur = (r.json() or {}).get("current") or {}
-            temp_f = cur.get("temperature_2m")
-            humidity = cur.get("relative_humidity_2m")
-            altim = pressure_to_inhg(cur.get("pressure_msl") if cur.get("pressure_msl") is not None else cur.get("surface_pressure"))
-            wx = {
-                "temp_f": temp_f,
-                "humidity_pct": humidity,
-                "altimeter_inhg": altim,
-                "track": rec["name"],
-                "address": rec["address"],
-                "elev_ft": elev,
-                "weather_source": f"Open-Meteo {float(lat):.3f},{float(lon):.3f}",
-            }
-            extra = calculate_weather(wx["temp_f"], wx["altimeter_inhg"], wx["humidity_pct"] or 50, elev)
-            wx.update(extra)
-            if weather_looks_sane(wx):
-                return wx
-        nws = fetch_weather_noaa(lat, lon)
-        if nws:
-            nws["track"] = rec["name"]
-            nws["address"] = rec.get("address")
-            nws["elev_ft"] = elev
-            extra = calculate_weather(nws.get("temp_f"), nws.get("altimeter_inhg"), nws.get("humidity_pct") or 50, elev)
-            nws.update(extra)
-            if weather_looks_sane(nws):
-                return nws
+    metar = fetch_weather(icao, when=when, elev=elev)
+    if not metar:
         return None
-    except Exception:
-        nws = fetch_weather_noaa(lat, lon) if lat is not None else None
-        return nws
+    metar["track"] = rec.get("name") or track_name
+    metar["address"] = rec.get("address")
+    metar["elev_ft"] = elev
+    return metar if weather_looks_sane(metar) else None
 
 def parse_import_block(block):
     data = {}
@@ -886,19 +893,14 @@ def fill_weather_for_run(run: dict) -> dict:
         run["weather_pending"] = ""
         return run
     track = run.get("track") or "Numidia Dragway"
-    wx_text, _ = grok_lookup_weather(track, run.get("date"), run.get("time"))
-    if not wx_text:
+    when = _parse_run_when(run.get("date"), run.get("time"))
+    wx = fetch_weather_for_track(track, when=when)
+    if not wx:
         return run
-    wx = parse_import_block(wx_text)
     for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
               "water_grains", "air_density_pct", "vapor_pressure"]:
         if run.get(k) in [None, ""] and wx.get(k) not in [None, ""]:
             run[k] = wx[k]
-    if run.get("temp_f") and run.get("altimeter_inhg"):
-        extra = calculate_weather(run.get("temp_f"), run.get("altimeter_inhg"), run.get("humidity_pct", 50))
-        for k in ["density_altitude", "water_grains", "air_density_pct", "vapor_pressure"]:
-            if not run.get(k) and extra.get(k) is not None:
-                run[k] = extra.get(k)
     run["weather_pending"] = ""
     update_run_in_sheet(run)
     return run
@@ -1463,7 +1465,8 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
             "weather_pending": "yes",
         }
         track = new_run.get("track")
-        wx = fetch_weather_for_track(track) if track and track != "Unknown" else None
+        when = _parse_run_when(new_run.get("date"), new_run.get("time"))
+        wx = fetch_weather_for_track(track, when=when) if track and track != "Unknown" else None
         if wx and weather_looks_sane(wx):
             for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
                       "water_grains", "air_density_pct", "vapor_pressure"]:
@@ -1704,7 +1707,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.47 • Auto Log • Weather • Predict</p>
+    <p>v2.8.49 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1903,18 +1906,29 @@ if st.session_state.nav == "Auto Log":
 
     notes = st.text_area("Additional Notes (spin / lift / brakes)", height=70, key="photo_notes")
 
-    auto_running = False
+    auto_running = bool(st.session_state.get("auto_busy"))
     cur_auto = read_job(st.session_state.get("auto_job_id"))
     if cur_auto and str(cur_auto.get("status")) == "running":
         auto_running = True
+        st.session_state.auto_busy = True
     if auto_running:
-        st.caption("A slip is already being read. Wait for it to finish.")
-    elif st.button("Extract with Smart Slip", type="primary", use_container_width=True):
+        st.warning("Reading this slip now. Do not tap Extract again.")
+    extract = st.button(
+        "Extract with Smart Slip",
+        type="primary",
+        use_container_width=True,
+        disabled=auto_running,
+    )
+    if extract and not auto_running:
+        st.session_state.auto_busy = True
         if not str(car_number or "").strip():
+            st.session_state.auto_busy = False
             st.error("Enter the car number before Smart Slip can read the slip.")
         elif not uploaded:
+            st.session_state.auto_busy = False
             st.error("Please upload a photo first.")
         elif not get_xai_client():
+            st.session_state.auto_busy = False
             st.error("Smart Slip is not connected. Add `XAI_API_KEY` to Streamlit Secrets.")
         else:
             img_bytes = prepare_slip_image(uploaded.read())
@@ -1991,19 +2005,23 @@ notes=
             time.sleep(2)
             st.rerun()
         elif stt == "done":
+            st.session_state.auto_busy = False
             if st.session_state.get("auto_reloaded") != str(auto_job.get("id")):
                 st.session_state.data_loaded = False
                 load_data_from_sheet()
                 st.session_state.auto_reloaded = str(auto_job.get("id"))
             et_s = auto_job.get("result") or ""
             extra = auto_job.get("extra") or ""
-            msg = "SAVED"
-            if et_s and et_s not in ["saved", "SAVED"]:
-                msg += f" ET {et_s}s"
-            if extra:
-                msg += f" @ {extra}"
-            st.markdown(f"<div class='ss-ok'>{msg}</div>", unsafe_allow_html=True)
+            et_line = f"ET {et_s}s" if et_s and et_s not in ["saved", "SAVED"] else "Slip read"
+            track_line = extra or ""
+            st.markdown(
+                f"<div class='ss-ok'>READING COMPLETE<br><span>{et_line}"
+                f"{(' @ ' + track_line) if track_line else ''}</span>"
+                f"<span>Entered in Log Book</span></div>",
+                unsafe_allow_html=True,
+            )
         elif stt == "error":
+            st.session_state.auto_busy = False
             st.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
             if auto_job.get("error"):
                 st.error(auto_job.get("error"))
@@ -2588,4 +2606,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.47")
+st.caption("Smart Slip v2.8.49")
