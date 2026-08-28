@@ -1310,7 +1310,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.28 • Auto Log • Weather • Predict</p>
+    <p>v2.8.30 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1756,12 +1756,14 @@ if st.session_state.nav == "Predict":
             and str(r.get("excluded") or "").lower() not in ["yes", "true", "1"]
         ]
         pred_track = render_track_picker("pred")
-
-        if st.button("Ask Smart Slip for Prediction", type="primary", use_container_width=True):
+        prof = get_profile_by_id(selected_pid) or {}
+        if len(vehicle_runs) < 2:
+            st.info("Need at least 2 logged runs for this car before predicting.")
+        elif st.button("Ask Smart Slip for Prediction", type="primary", use_container_width=True):
             if not get_xai_client():
                 st.error("Smart Slip is not connected. Add XAI_API_KEY to Streamlit Secrets first.")
             else:
-                recent = vehicle_runs[-6:]
+                recent = vehicle_runs[-15:]
                 wx_bits = ""
                 wx_err = None
                 with st.spinner("Pulling weather and dialing it in..."):
@@ -1769,49 +1771,102 @@ if st.session_state.nav == "Predict":
                     if not wx:
                         wx_text, wx_err = grok_lookup_weather(pred_track)
                         wx = parse_import_block(wx_text) if wx_text else {}
-                    if wx:
-                        extra = {}
-                        if wx.get("temp_f") and wx.get("altimeter_inhg"):
-                            extra = calculate_weather(
-                                wx.get("temp_f"),
-                                wx.get("altimeter_inhg"),
-                                wx.get("humidity_pct", 50),
-                            )
-                        loc = wx.get("address") or pred_track
-                        wx_bits = (
-                            f"{loc} | Temp {wx.get('temp_f', 'N/A')}°F | Humidity {wx.get('humidity_pct', 'N/A')}% | "
-                            f"Barometer {wx.get('altimeter_inhg', 'N/A')} inHg | "
-                            f"DA {wx.get('density_altitude') or extra.get('density_altitude') or 'N/A'} ft | "
-                            f"Grains {wx.get('water_grains') or extra.get('water_grains') or 'N/A'} | "
-                            f"Air density {wx.get('air_density_pct') or extra.get('air_density_pct') or 'N/A'}% | "
-                            f"Vapor {wx.get('vapor_pressure') or extra.get('vapor_pressure') or 'N/A'}"
+                    extra = {}
+                    if wx.get("temp_f") and wx.get("altimeter_inhg"):
+                        extra = calculate_weather(
+                            wx.get("temp_f"),
+                            wx.get("altimeter_inhg"),
+                            wx.get("humidity_pct", 50),
+                            wx.get("elev_ft") or 400,
                         )
-                    prompt = f"You are helping with bracket racing predictions for {selected_vehicle} (user: {st.session_state.user_name}).\n\n"
-                    prompt += "Recent runs (keep cars and users completely separate):\n"
+                    tinfo = find_track(pred_track) or {}
+                    loc = tinfo.get("address") or wx.get("address") or pred_track
+                    if wx:
+                        wx_bits = (
+                            f"{tinfo.get('name') or pred_track} ({loc})"
+                            f" | Temp {wx.get('temp_f', 'N/A')}°F"
+                            f" | Humidity {wx.get('humidity_pct', 'N/A')}%"
+                            f" | Barometer {wx.get('altimeter_inhg', 'N/A')} inHg"
+                            f" | DA {wx.get('density_altitude') or extra.get('density_altitude') or 'N/A'} ft"
+                            f" | Grains {wx.get('water_grains') or extra.get('water_grains') or 'N/A'}"
+                            f" | Air density {wx.get('air_density_pct') or extra.get('air_density_pct') or 'N/A'}%"
+                            f" | Vapor {wx.get('vapor_pressure') or extra.get('vapor_pressure') or 'N/A'} inHg"
+                        )
+                        if tinfo.get("elev_ft"):
+                            wx_bits += f" | Strip elev {tinfo.get('elev_ft')} ft"
+                        if tinfo.get("lat") is not None:
+                            wx_bits += f" | Pin {tinfo.get('lat')},{tinfo.get('lon')}"
+                    prompt = (
+                        f"You are Smart Slip. Predict the next ET for one bracket car.\n"
+                        f"User: {st.session_state.user_name}\n"
+                        f"Car profile: {prof.get('name') or selected_vehicle}\n"
+                        f"- Car number: {prof.get('car_number') or 'N/A'}\n"
+                        f"- Type: {prof.get('car_type') or 'N/A'}\n"
+                        f"- Fuel: {prof.get('fuel_type') or 'N/A'}\n"
+                        f"- Weight: {prof.get('weight') or 'N/A'} lbs\n"
+                        f"- Tires: {prof.get('tire_size') or 'N/A'} {prof.get('tire_type') or ''}\n"
+                        f"- 1st gear: {prof.get('trans_first_gear') or 'N/A'}\n"
+                        f"- Rear gear: {prof.get('rear_gear') or 'N/A'}\n\n"
+                    )
+                    prompt += f"Track: {tinfo.get('name') or pred_track}\n"
+                    prompt += f"Track location: {loc}\n"
+                    if tinfo.get("elev_ft"):
+                        prompt += f"Track elevation: {tinfo.get('elev_ft')} ft\n"
+                    if wx_bits:
+                        prompt += f"Current weather at the strip: {wx_bits}\n"
+                    elif wx_err:
+                        prompt += "Weather lookup failed. Predict from run history only and say weather was unavailable.\n"
+                    quarter = any(r.get("et") not in [None, ""] for r in recent)
+                    eighth_only = (not quarter) and any(r.get("eighth_et") not in [None, ""] for r in recent)
+                    race_len = "1/4 mile" if quarter else ("1/8 mile" if eighth_only else "unknown — infer from which ETs are filled in")
+                    prompt += f"Race distance for this car/session: {race_len}\n"
+                    last = recent[-1] if recent else {}
+                    if last.get("density_altitude") not in [None, ""] and (wx.get("density_altitude") or extra.get("density_altitude")) not in [None, ""]:
+                        prompt += (
+                            f"Weather change vs last logged pass: last DA {last.get('density_altitude')} ft "
+                            f"at {last.get('date')} {last.get('time') or ''}; "
+                            f"now DA {wx.get('density_altitude') or extra.get('density_altitude')} ft. "
+                            f"Move ET using THIS car's own change with DA/grains, not a generic rule.\n"
+                        )
+                    prompt += "\nLogged runs for THIS car only (do not mix cars or users):\n"
                     for r in recent:
                         etv = r.get("et")
                         et_txt = f"{float(etv):.3f}s" if etv not in [None, ""] else "—"
-                        prompt += f"- {r.get('date')}: ET {et_txt} @ {r.get('density_altitude', 'N/A')} ft DA"
-                        if r.get("dial"): prompt += f" | dial {r.get('dial')}"
-                        if r.get("reaction_time") not in [None, ""]: prompt += f" | RT {r.get('reaction_time')}"
-                        if r.get("mov") not in [None, ""]: prompt += f" | MOV {r.get('mov')}"
-                        if r.get("sixty_ft"): prompt += f" | 60ft: {r['sixty_ft']}"
-                        if r.get("three_thirty_ft"): prompt += f" | 330ft: {r['three_thirty_ft']}"
-                        if r.get("eighth_et") or r.get("eighth_mph"):
-                            prompt += f" | 1/8: {r.get('eighth_et', 'N/A')} @ {r.get('eighth_mph', 'N/A')} mph"
-                        if r.get("thousand_et"):
-                            prompt += f" | 1000: {r.get('thousand_et')}"
-                        if r.get("trap_mph"):
-                            prompt += f" | trap: {r.get('trap_mph')} mph"
-                        if r.get("notes"): prompt += f" | Notes: {r['notes']}"
-                        prompt += "\n"
-                    prompt += f"\nTrack: {pred_track}\n"
-                    if wx_bits:
-                        prompt += f"Current track weather (just pulled): {wx_bits}\n"
-                    elif wx_err:
-                        prompt += "Weather lookup failed. Predict from run history only and say weather was unavailable.\n"
-                    prompt += "Use temp, humidity, barometer, and water grains together. Do not mix cars or users.\n"
-                    prompt += "\nGive a smart ET prediction with clear reasoning. Do not mix data from other cars or users."
+                        line = (
+                            f"- {r.get('date')} {r.get('time') or ''} @ {r.get('track') or pred_track}: "
+                            f"ET {et_txt} | 60' {r.get('sixty_ft') or '—'} | 330' {r.get('three_thirty_ft') or '—'} | "
+                            f"1/8 {r.get('eighth_et') or '—'} @ {r.get('eighth_mph') or '—'} | "
+                            f"1000' {r.get('thousand_et') or '—'} | 1/4 {et_txt} @ {r.get('trap_mph') or '—'} | "
+                            f"RT {r.get('reaction_time') if r.get('reaction_time') not in [None, ''] else '—'} | "
+                            f"DA {r.get('density_altitude') or 'N/A'} | "
+                            f"Temp {r.get('temp_f') or 'N/A'} | Hum {r.get('humidity_pct') or 'N/A'} | "
+                            f"Baro {r.get('altimeter_inhg') or 'N/A'} | Grains {r.get('water_grains') or 'N/A'} | "
+                            f"Air dens {r.get('air_density_pct') or 'N/A'} | Vapor {r.get('vapor_pressure') or 'N/A'}"
+                        )
+                        if r.get("notes"):
+                            line += f" | Notes: {r.get('notes')}"
+                        prompt += line + "\n"
+                    prompt += """
+Rules:
+- First decide race distance: 1/4 if a 1/4 ET exists, else 1/8 if only 1/8 data exists.
+- Notes matter. Read spin / lift / brakes / nitrous and WHEN they happened.
+- SPIN slows the 60' and that loss usually carries the whole run. Decide if it will spin again using time of day, sun on the track, and whether prep is going away compared with this car's other runs. If a spin looks like a one-off, estimate the clean 60' from this car's clean passes and build the ET from that.
+- LIFT or BRAKES almost always happen right before the finish. 1/8-mile: lift/brakes between 330' and the 1/8. Predict from 60' and 330' only. Ignore the slowed 1/8 ET as the target.
+- LIFT or BRAKES on a 1/4-mile: almost always between 1000' and the 1/4. Predict from 60', 330', 1/8, and 1000' only. Ignore the slowed 1/4 ET as the target.
+- Build a CLEAN ET from the usable incrementals. The slowed finish is what it RAN, not what it CAN run. Predict the clean ET unless you have a clear reason it will lift/brake/spin again.
+- Do not average in junk. A spun 60' or a lifted finish must not pull the number. Prefer the tight cluster of clean 60' and 330' (and 1/8 / 1000' on a quarter).
+- Weather: compare current DA/grains/temp to the last pass. Move ET only with this car's own change, not a generic seconds-per-1000-ft rule.
+- Car profile (weight, gears, tires, fuel, door vs dragster) is only to interpret the log — e.g. whether a 60' is slow for this combo, or if bias + sun makes another spin likely. Never invent an ET that contradicts clean incrementals.
+- Early nitrous helps more than late. Early lift/spin hurts more than late.
+- Use temp, humidity, barometer, grains, air density, vapor pressure, and DA together. Do not mix cars or users.
+- Do not recommend a dial-in.
+
+Reply with:
+1) Predicted ET (3 decimals)
+2) Clean ET if no lift/spin/brakes (if different)
+3) A short confidence blurb (high / medium / low and why — sample size, weather change, spin/lift notes, consistency of 60'/330')
+4) Brief reasoning
+"""
                     result, err = call_grok(prompt)
                     if err:
                         st.error(err)
@@ -2113,4 +2168,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.28")
+st.caption("Smart Slip v2.8.30")
