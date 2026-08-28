@@ -486,8 +486,6 @@ def render_track_picker(prefix: str):
     if last_track:
         labels.setdefault(last_track, last_track)
     options = sorted(set(names))
-    if last_track:
-        st.caption(f"Using **{last_track}**")
     picked = st.selectbox(
         "Drag Strip",
         options,
@@ -502,7 +500,11 @@ def render_track_picker(prefix: str):
         if pred_track not in saved:
             saved.append(pred_track)
             st.session_state.saved_tracks = saved
+        if picked and pred_track != last_track:
+            st.session_state.last_pred_track = pred_track
+            st.rerun()
         st.session_state.last_pred_track = pred_track
+        st.caption(f"Using **{pred_track}**")
     return pred_track
 
 def fetch_weather_for_track(track_name):
@@ -1308,7 +1310,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.27 • Auto Log • Weather • Predict</p>
+    <p>v2.8.28 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2111,4 +2113,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.27")
+st.caption("Smart Slip v2.8.28")
