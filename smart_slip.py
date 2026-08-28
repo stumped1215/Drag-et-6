@@ -204,6 +204,16 @@ st.markdown("""
     0% { transform: scale(.96); background:#7dffb0; color:#111; }
     100% { transform: scale(1); background:#1f9d55; color:#fff; }
   }
+  .ss-et {
+    text-align: center;
+    font-size: 3.1rem;
+    font-weight: 800;
+    letter-spacing: .04em;
+    color: #e8c547;
+    line-height: 1;
+    margin: 8px 0 4px 0;
+  }
+  .ss-et span { display:block; font-size:.85rem; font-weight:600; color:#cfc6a8; letter-spacing:.08em; margin-bottom:6px; }
   .ss-brand p {
     margin: 2px 0 0 0;
     opacity: 0.65;
@@ -429,6 +439,45 @@ def calculate_weather(temp_f, altim_inhg, humidity=50, elevation=400):
 def calculate_da(temp_f, altim_inhg, humidity=50, elevation=400):
     return calculate_weather(temp_f, altim_inhg, humidity, elevation).get("density_altitude")
 
+def pressure_to_inhg(val):
+    if val in [None, ""]:
+        return None
+    try:
+        v = float(val)
+    except Exception:
+        return None
+    if v > 50:
+        v = v / 33.8639
+    if v < 24 or v > 32.5:
+        return None
+    return round(v, 2)
+
+def weather_looks_sane(wx: dict) -> bool:
+    if not wx:
+        return False
+    da = wx.get("density_altitude")
+    air = wx.get("air_density_pct")
+    baro = wx.get("altimeter_inhg")
+    try:
+        if baro is not None and not (24 <= float(baro) <= 32.5):
+            return False
+        if da is not None and abs(float(da)) > 12000:
+            return False
+        if air is not None and not (50 <= float(air) <= 130):
+            return False
+    except Exception:
+        return False
+    return wx.get("temp_f") not in [None, ""]
+
+def extract_predicted_et(text: str):
+    if not text:
+        return None
+    m = re.search(r"(?:predicted\s*et|1\))\s*[^\d]{0,24}(\d{1,2}\.\d{2,3})", text, re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"\b(\d{1,2}\.\d{3})\b", text)
+    return float(m.group(1)) if m else None
+
 def rh_from_temp_dew(temp_c, dew_c):
     try:
         es = sat_vapor_pressure_hpa(temp_c)
@@ -511,6 +560,27 @@ def fetch_weather_for_track(track_name):
     rec = find_track(track_name)
     if not rec:
         return None
+    elev = rec.get("elev_ft") or 400
+    icao = rec.get("icao")
+    if icao:
+        metar = fetch_weather(icao)
+        if metar:
+            baro = pressure_to_inhg(metar.get("altimeter_inhg"))
+            if baro:
+                metar["altimeter_inhg"] = baro
+            extra = calculate_weather(
+                metar.get("temp_f"),
+                metar.get("altimeter_inhg"),
+                metar.get("humidity_pct") or 50,
+                elev,
+            )
+            metar.update(extra)
+            metar["track"] = rec["name"]
+            metar["address"] = rec.get("address")
+            metar["elev_ft"] = elev
+            metar["weather_source"] = f"METAR {icao}"
+            if weather_looks_sane(metar):
+                return metar
     lat, lon = rec.get("lat"), rec.get("lon")
     if lat is None or lon is None:
         cache = st.session_state.setdefault("geo_cache", {})
@@ -521,8 +591,8 @@ def fetch_weather_for_track(track_name):
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            "&current=temperature_2m,relative_humidity_2m,surface_pressure"
-            "&temperature_unit=fahrenheit&pressure_unit=inch_hg"
+            "&current=temperature_2m,relative_humidity_2m,pressure_msl,surface_pressure"
+            "&temperature_unit=fahrenheit"
         )
         r = requests.get(url, timeout=8)
         if r.status_code != 200:
@@ -530,18 +600,21 @@ def fetch_weather_for_track(track_name):
         cur = (r.json() or {}).get("current") or {}
         temp_f = cur.get("temperature_2m")
         humidity = cur.get("relative_humidity_2m")
-        altim = cur.get("surface_pressure")
+        altim = pressure_to_inhg(cur.get("pressure_msl") if cur.get("pressure_msl") is not None else cur.get("surface_pressure"))
         elev = rec.get("elev_ft") or 400
         wx = {
             "temp_f": temp_f,
             "humidity_pct": humidity,
-            "altimeter_inhg": round(float(altim), 2) if altim is not None else None,
+            "altimeter_inhg": altim,
             "track": rec["name"],
             "address": rec["address"],
+            "elev_ft": elev,
             "weather_source": f"Open-Meteo {float(lat):.3f},{float(lon):.3f}",
         }
         extra = calculate_weather(wx["temp_f"], wx["altimeter_inhg"], wx["humidity_pct"] or 50, elev)
         wx.update(extra)
+        if not weather_looks_sane(wx):
+            return None
         return wx
     except Exception:
         return None
@@ -1310,7 +1383,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.30 • Auto Log • Weather • Predict</p>
+    <p>v2.8.32 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1768,20 +1841,24 @@ if st.session_state.nav == "Predict":
                 wx_err = None
                 with st.spinner("Pulling weather and dialing it in..."):
                     wx = fetch_weather_for_track(pred_track) or {}
-                    if not wx:
-                        wx_text, wx_err = grok_lookup_weather(pred_track)
-                        wx = parse_import_block(wx_text) if wx_text else {}
+                    tinfo = find_track(pred_track) or {}
                     extra = {}
+                    baro = pressure_to_inhg(wx.get("altimeter_inhg"))
+                    if baro:
+                        wx["altimeter_inhg"] = baro
                     if wx.get("temp_f") and wx.get("altimeter_inhg"):
                         extra = calculate_weather(
                             wx.get("temp_f"),
                             wx.get("altimeter_inhg"),
                             wx.get("humidity_pct", 50),
-                            wx.get("elev_ft") or 400,
+                            tinfo.get("elev_ft") or wx.get("elev_ft") or 400,
                         )
-                    tinfo = find_track(pred_track) or {}
+                        wx.update({k: v for k, v in extra.items() if v is not None})
                     loc = tinfo.get("address") or wx.get("address") or pred_track
-                    if wx:
+                    if not weather_looks_sane(wx):
+                        wx_bits = ""
+                        wx_err = wx_err or "weather units invalid"
+                    if weather_looks_sane(wx):
                         wx_bits = (
                             f"{tinfo.get('name') or pred_track} ({loc})"
                             f" | Temp {wx.get('temp_f', 'N/A')}°F"
@@ -1792,6 +1869,9 @@ if st.session_state.nav == "Predict":
                             f" | Air density {wx.get('air_density_pct') or extra.get('air_density_pct') or 'N/A'}%"
                             f" | Vapor {wx.get('vapor_pressure') or extra.get('vapor_pressure') or 'N/A'} inHg"
                         )
+                        src = wx.get("weather_source")
+                        if src:
+                            wx_bits += f" | {src}"
                         if tinfo.get("elev_ft"):
                             wx_bits += f" | Strip elev {tinfo.get('elev_ft')} ft"
                         if tinfo.get("lat") is not None:
@@ -1872,12 +1952,18 @@ Reply with:
                         st.error(err)
                     else:
                         st.session_state.grok_prediction = result
+                        st.session_state.pred_et_big = extract_predicted_et(result)
                         st.session_state.pred_wx_used = wx_bits
                         st.success("Prediction ready")
+        if st.session_state.get("pred_et_big") is not None:
+            st.markdown(
+                f"<div class='ss-et'><span>PREDICTED ET</span>{float(st.session_state.pred_et_big):.3f}</div>",
+                unsafe_allow_html=True,
+            )
         if st.session_state.get("pred_wx_used"):
             st.caption(st.session_state.pred_wx_used)
         if st.session_state.grok_prediction:
-            st.markdown("### Prediction")
+            st.markdown("### Details")
             st.write(st.session_state.grok_prediction)
 
 # ====================== HISTORY ======================
@@ -2168,4 +2254,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.30")
+st.caption("Smart Slip v2.8.32")

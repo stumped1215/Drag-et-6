@@ -341,6 +341,61 @@ TRACK_POINTS = {
     "capitol raceway": (39.0294, -76.6870, 150),
 }
 
+TRACK_ICAO = {
+    "numidia dragway": "KSEG",
+    "maple grove raceway": "KRDG",
+    "atco dragway": "KVAY",
+    "cecil county dragway": "KILG",
+    "mason dixon dragway": "KHGR",
+    "south jersey dragway": "KACY",
+    "capitol raceway": "KNAK",
+    "maryland international raceway": "KNHK",
+    "old bridge township raceway park": "KBLM",
+    "island dragway": "KMMU",
+    "lebanon valley dragway": "KALB",
+    "beaver springs dragway": "KSEG",
+    "keystone raceway park": "KLBE",
+    "south mountain raceway": "KCXY",
+    "new england dragway": "KPSM",
+    "gainesville raceway": "KGNV",
+    "zmax dragway": "KCLT",
+    "auto club raceway at pomona": "KONT",
+    "in-n-out burger pomona dragstrip": "KONT",
+    "bandimere speedway": "KDEN",
+    "the strip at las vegas motor speedway": "KVGT",
+    "summit motorsports park": "KCLE",
+    "lucas oil raceway": "KEYE",
+    "texas motorplex": "KHYI",
+    "bristol dragway": "KTRI",
+    "atlanta dragway": "KGVL",
+    "route 66 raceway": "KJOT",
+    "sonoma raceway": "KSTS",
+    "pacific raceways": "KSEA",
+    "brainerd international raceway": "KBRD",
+    "world wide technology raceway": "KCPS",
+    "heartland motorsports park": "KFOE",
+    "royal purple raceway": "KHOU",
+    "houston raceway park": "KHOU",
+    "firebird motorsports park": "KCHD",
+    "tucson dragway": "KTUS",
+    "famoso raceway": "KBFL",
+    "sacramento raceway": "KSAC",
+    "bradenton motorsports park": "KSRQ",
+    "orlando speed world": "KORL",
+    "virginia motorsports park": "KPTB",
+    "richmond dragway": "KRIC",
+    "national trail raceway": "KCMH",
+    "milan dragway": "KARB",
+    "great lakes dragaway": "KENW",
+    "no problem raceway park": "KHUM",
+    "alaska raceway park": "PAAQ",
+    "toronto motorsports park": "CYHM",
+    "castrol raceway": "CYEG",
+    "napierville dragway": "CYUL",
+    "mission raceway park": "CYXX",
+    "i-29 dragway": "KOMA",
+}
+
 
 def _norm_track(s):
     import re
@@ -407,6 +462,7 @@ def find_track(query):
     pt = TRACK_POINTS.get(rec["name"].lower())
     if pt:
         rec["lat"], rec["lon"], rec["elev_ft"] = pt
+    rec["icao"] = TRACK_ICAO.get(rec["name"].lower())
     return rec
 
 
