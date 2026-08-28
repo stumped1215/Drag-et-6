@@ -13,6 +13,7 @@ import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from typing import Optional
+import threading
 import io
 from PIL import Image, ImageOps, ImageFilter
 
@@ -255,6 +256,8 @@ WORKSHEET_RUNS = "Runs"
 WORKSHEET_PROFILES = "Profiles"
 WORKSHEET_USERS = "Users"
 WORKSHEET_BUGS = "Bugs"
+WORKSHEET_PREDICT = "PredictJobs"
+PRED_PROMPTS = {}
 AUTH_COOKIE = "smartslip_auth"
 AUTH_DAYS = 30
 
@@ -1170,6 +1173,140 @@ def delete_profile_and_runs(profile: dict):
         st.error(f"Could not delete from Google Sheet: {e}")
         return False
 
+def get_jobs_ws():
+    client = get_gspread_client()
+    if client is None:
+        return None
+    sheet = client.open(SHEET_NAME)
+    try:
+        return sheet.worksheet(WORKSHEET_PREDICT)
+    except Exception:
+        ws = sheet.add_worksheet(title=WORKSHEET_PREDICT, rows=400, cols=8)
+        ws.append_row(["id", "user", "kind", "status", "result", "error", "extra", "created"])
+        return ws
+
+def write_job(job_id, user, kind, status, result="", error="", extra=""):
+    JOB_MEM = PRED_PROMPTS
+    JOB_MEM[job_id] = {
+        "id": job_id, "user": user, "kind": kind, "status": status,
+        "result": result or "", "error": error or "", "extra": extra or "",
+    }
+    ws = get_jobs_ws()
+    if ws is None:
+        return
+    try:
+        records = ws.get_all_records()
+        headers = ws.row_values(1) or ["id", "user", "kind", "status", "result", "error", "extra", "created"]
+        row = {
+            "id": job_id, "user": user or "", "kind": kind or "",
+            "status": status, "result": (result or "")[:4000],
+            "error": (error or "")[:1000], "extra": (extra or "")[:1500],
+            "created": datetime.now().isoformat(timespec="seconds"),
+        }
+        for i, rec in enumerate(records, start=2):
+            if str(rec.get("id")) == str(job_id):
+                for h in headers:
+                    if h in row:
+                        ws.update_cell(i, headers.index(h) + 1, row.get(h, ""))
+                return
+        ws.append_row([row.get(h, "") for h in headers])
+    except Exception:
+        pass
+
+def read_job(job_id):
+    if not job_id:
+        return PRED_PROMPTS.get(job_id)
+    if job_id in PRED_PROMPTS and PRED_PROMPTS[job_id].get("status") in ["done", "error", "running"]:
+        mem = PRED_PROMPTS[job_id]
+        if mem.get("status") != "running":
+            return mem
+    ws = get_jobs_ws()
+    if ws is None:
+        return PRED_PROMPTS.get(job_id)
+    try:
+        for rec in ws.get_all_records():
+            if str(rec.get("id")) == str(job_id):
+                return rec
+    except Exception:
+        pass
+    return PRED_PROMPTS.get(job_id)
+
+def _auto_worker(job_id, prompt, img_bytes, ctx):
+    try:
+        result, err = call_grok(prompt, image_bytes=img_bytes)
+        if err or not result:
+            write_job(job_id, ctx.get("user"), "auto", "error", error=err or "Could not read the slip")
+            return
+        data = parse_import_block(result)
+        if not data:
+            write_job(job_id, ctx.get("user"), "auto", "error", error="Could not read the slip. Try a clearer photo.")
+            return
+        def _num(k):
+            try:
+                v = data.get(k)
+                return None if v in [None, ""] else float(v)
+            except Exception:
+                return None
+        dial_n, rt_n, s60_n = _num("dial"), _num("reaction_time"), _num("sixty_ft")
+        if s60_n is None and rt_n is not None and 1.15 <= rt_n <= 2.40:
+            if dial_n is None or 0.001 <= abs(dial_n) <= 0.999:
+                data["sixty_ft"] = rt_n
+                data["reaction_time"] = dial_n
+                data["dial"] = None
+        notes = ctx.get("notes") or ""
+        final_notes = data.get("notes", "")
+        if notes:
+            final_notes = (final_notes + " | " + notes).strip(" |")
+        new_run = {
+            "id": str(datetime.now().timestamp()),
+            "user": ctx.get("user"),
+            "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
+            "time": data.get("time", ""),
+            "track": canonicalize_track(data.get("track")) or data.get("track") or "Unknown",
+            "vehicle": ctx.get("profile_name") or "Main Car",
+            "profile_id": ctx.get("profile_id"),
+            "dial": data.get("dial"),
+            "reaction_time": data.get("reaction_time"),
+            "et": data.get("et"),
+            "sixty_ft": data.get("sixty_ft"),
+            "three_thirty_ft": data.get("three_thirty_ft"),
+            "eighth_et": data.get("eighth_et"),
+            "eighth_mph": data.get("eighth_mph"),
+            "thousand_et": data.get("thousand_et"),
+            "trap_mph": data.get("trap_mph"),
+            "mov": data.get("mov"),
+            "notes": final_notes,
+            "weather_pending": "yes",
+        }
+        track = new_run.get("track")
+        wx = fetch_weather_for_track(track) if track and track != "Unknown" else None
+        if wx and weather_looks_sane(wx):
+            for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
+                      "water_grains", "air_density_pct", "vapor_pressure"]:
+                if wx.get(k) not in [None, ""]:
+                    new_run[k] = wx.get(k)
+            new_run["weather_pending"] = ""
+        save_run_to_sheet(new_run)
+        et_s = ""
+        try:
+            if new_run.get("et") not in [None, ""]:
+                et_s = f"{float(new_run['et']):.3f}"
+        except Exception:
+            pass
+        write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=track or "")
+    except Exception as e:
+        write_job(job_id, ctx.get("user"), "auto", "error", error=str(e))
+
+def _predict_worker(job_id, prompt, user, wx_bits):
+    try:
+        result, err = call_grok(prompt, model="grok-4.6")
+        if err:
+            write_job(job_id, user, "predict", "error", extra=wx_bits or "", error=err)
+        else:
+            write_job(job_id, user, "predict", "done", result=result or "", extra=wx_bits or "")
+    except Exception as e:
+        write_job(job_id, user, "predict", "error", extra=wx_bits or "", error=str(e))
+
 # ====================== AUTH ======================
 def _hash_pw(password: str, salt: str = None):
     salt = salt or pysecrets.token_hex(16)
@@ -1383,7 +1520,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.32 • Auto Log • Weather • Predict</p>
+    <p>v2.8.36 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1565,14 +1702,8 @@ if st.session_state.nav == "Auto Log":
         elif not get_xai_client():
             st.error("Smart Slip is not connected. Add `XAI_API_KEY` to Streamlit Secrets.")
         else:
-            notice = st.empty()
-            notice.markdown(
-                "<div class='ss-wait'>SMART SLIP READING<span>Do not leave this page</span></div>",
-                unsafe_allow_html=True,
-            )
-            with st.spinner("Reading the timeslip..."):
-                img_bytes = prepare_slip_image(uploaded.read())
-                prompt = f"""Read this drag timeslip photo. Use ONLY the side/column for car number {car_number or 'the entered car'}.
+            img_bytes = prepare_slip_image(uploaded.read())
+            prompt = f"""Read this drag timeslip photo. Use ONLY the side/column for car number {car_number or 'the entered car'}.
 
 Layouts you will see:
 1) Compulink: labels on the left, LEFT numbers, RIGHT numbers. Match Car # to LEFT or RIGHT.
@@ -1615,89 +1746,44 @@ trap_mph=
 mov=
 notes=
 """
-                result, err = call_grok(prompt, image_bytes=img_bytes)
-                if err:
-                    notice.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
-                    st.error(f"Smart Slip error: {err}")
-                else:
-                    data = parse_import_block(result)
-                    if not data:
-                        notice.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
-                        st.error("Could not read the slip. Try a clearer photo.")
-                    else:
-                        def _num(k):
-                            try:
-                                v = data.get(k)
-                                return None if v in [None, ""] else float(v)
-                            except Exception:
-                                return None
-                        dial_n, rt_n, s60_n = _num("dial"), _num("reaction_time"), _num("sixty_ft")
-                        if s60_n is None and rt_n is not None and 1.15 <= rt_n <= 2.40:
-                            if dial_n is None or 0.001 <= abs(dial_n) <= 0.999:
-                                data["sixty_ft"] = rt_n
-                                data["reaction_time"] = dial_n
-                                data["dial"] = None
-                        profile_name = ""
-                        if selected_profile_id:
-                            p = get_profile_by_id(selected_profile_id)
-                            if p:
-                                profile_name = p["name"]
-                        final_notes = data.get("notes", "")
-                        if notes:
-                            final_notes = (final_notes + " | " + notes).strip(" |")
-                        new_run = {
-                            "id": str(datetime.now().timestamp()),
-                            "user": st.session_state.get("user_email") or st.session_state.user_name,
-                            "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
-                            "time": data.get("time", ""),
-                            "track": canonicalize_track(data.get("track")) or data.get("track") or "Unknown",
-                            "vehicle": profile_name or "Main Car",
-                            "profile_id": selected_profile_id,
-                            "dial": data.get("dial"),
-                            "reaction_time": data.get("reaction_time"),
-                            "et": data.get("et"),
-                            "sixty_ft": data.get("sixty_ft"),
-                            "three_thirty_ft": data.get("three_thirty_ft"),
-                            "eighth_et": data.get("eighth_et"),
-                            "eighth_mph": data.get("eighth_mph"),
-                            "thousand_et": data.get("thousand_et"),
-                            "trap_mph": data.get("trap_mph"),
-                            "mov": data.get("mov"),
-                            "density_altitude": data.get("density_altitude"),
-                            "temp_f": data.get("temp_f"),
-                            "altimeter_inhg": data.get("altimeter_inhg"),
-                            "humidity_pct": data.get("humidity_pct"),
-                            "water_grains": data.get("water_grains"),
-                            "air_density_pct": data.get("air_density_pct"),
-                            "vapor_pressure": data.get("vapor_pressure"),
-                            "notes": final_notes,
-                            "weather_pending": "yes",
-                        }
-                        auto_fp = str({
-                            "date": new_run.get("date"),
-                            "time": new_run.get("time"),
-                            "et": new_run.get("et"),
-                            "sixty_ft": new_run.get("sixty_ft"),
-                            "profile_id": new_run.get("profile_id"),
-                        })
-                        if auto_fp == st.session_state.get("auto_last_fp"):
-                            notice.markdown("<div class='ss-bad'>Already saved</div>", unsafe_allow_html=True)
-                            st.error("That slip was already saved.")
-                        else:
-                            if new_run.get("track") and new_run["track"] != "Unknown":
-                                st.session_state.last_pred_track = new_run["track"]
-                            sheet_ok = save_run_to_sheet(new_run)
-                            st.session_state.runs.append(new_run)
-                            st.session_state.auto_last_fp = auto_fp
-                            q = list(st.session_state.get("wx_queue") or [])
-                            q.append(new_run.get("id"))
-                            st.session_state.wx_queue = q
-                            et_s = f" ET {float(new_run['et']):.3f}s" if new_run.get("et") not in [None, ""] else ""
-                            if sheet_ok:
-                                notice.markdown(f"<div class='ss-ok'>SAVED{et_s}</div>", unsafe_allow_html=True)
-                            else:
-                                notice.markdown("<div class='ss-bad'>Slip read — sheet save failed</div>", unsafe_allow_html=True)
-                                st.error("Read the slip but could not save it to the Google Sheet.")
+            profile_name = ""
+            if selected_profile_id:
+                p = get_profile_by_id(selected_profile_id)
+                if p:
+                    profile_name = p["name"]
+            job_id = str(datetime.now().timestamp())
+            ctx = {
+                "user": st.session_state.get("user_email") or st.session_state.user_name,
+                "profile_id": selected_profile_id,
+                "profile_name": profile_name,
+                "notes": notes,
+            }
+            write_job(job_id, ctx["user"], "auto", "running")
+            st.session_state.auto_job_id = job_id
+            threading.Thread(target=_auto_worker, args=(job_id, prompt, img_bytes, ctx), daemon=True).start()
+            st.rerun()
+
+    auto_job = read_job(st.session_state.get("auto_job_id"))
+    if auto_job:
+        stt = str(auto_job.get("status") or "")
+        if stt == "running":
+            st.markdown(
+                "<div class='ss-wait'>SMART SLIP READING<span>Stay in the app until this finishes</span></div>",
+                unsafe_allow_html=True,
+            )
+        elif stt == "done":
+            et_s = auto_job.get("result") or ""
+            extra = auto_job.get("extra") or ""
+            msg = "SAVED"
+            if et_s and et_s not in ["saved", "SAVED"]:
+                msg += f" ET {et_s}s"
+            if extra:
+                msg += f" @ {extra}"
+            st.markdown(f"<div class='ss-ok'>{msg}</div>", unsafe_allow_html=True)
+        elif stt == "error":
+            st.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
+            if auto_job.get("error"):
+                st.error(auto_job.get("error"))
 
 # ====================== MANUAL LOG ======================
 if st.session_state.nav == "Manual Log":
@@ -1836,7 +1922,7 @@ if st.session_state.nav == "Predict":
             if not get_xai_client():
                 st.error("Smart Slip is not connected. Add XAI_API_KEY to Streamlit Secrets first.")
             else:
-                recent = vehicle_runs[-15:]
+                recent = vehicle_runs[-8:]
                 wx_bits = ""
                 wx_err = None
                 with st.spinner("Pulling weather and dialing it in..."):
@@ -1941,20 +2027,37 @@ Rules:
 - Use temp, humidity, barometer, grains, air density, vapor pressure, and DA together. Do not mix cars or users.
 - Do not recommend a dial-in.
 
-Reply with:
-1) Predicted ET (3 decimals)
-2) Clean ET if no lift/spin/brakes (if different)
-3) A short confidence blurb (high / medium / low and why — sample size, weather change, spin/lift notes, consistency of 60'/330')
-4) Brief reasoning
+Reply in this exact short form. No numbered list. No extra paragraphs.
+Predicted ET: x.xxx
+Clean ET: x.xxx (only if lift/spin/brakes changed the finish)
+Confidence: high/medium/low — one sentence
+Why: two short sentences max.
 """
-                    result, err = call_grok(prompt)
-                    if err:
-                        st.error(err)
-                    else:
-                        st.session_state.grok_prediction = result
-                        st.session_state.pred_et_big = extract_predicted_et(result)
-                        st.session_state.pred_wx_used = wx_bits
-                        st.success("Prediction ready")
+                    job_id = str(datetime.now().timestamp())
+                    user = st.session_state.get("user_email") or st.session_state.user_name
+                    write_job(job_id, user, "predict", "running", extra=wx_bits)
+                    st.session_state.pred_job_id = job_id
+                    st.session_state.pred_wx_used = wx_bits
+                    threading.Thread(
+                        target=_predict_worker,
+                        args=(job_id, prompt, user, wx_bits),
+                        daemon=True,
+                    ).start()
+                    st.rerun()
+        pred_job = read_job(st.session_state.get("pred_job_id"))
+        if pred_job and str(pred_job.get("status")) == "running":
+            st.markdown(
+                "<div class='ss-wait'>SMART SLIP PREDICTING<span>Stay in the app until this finishes</span></div>",
+                unsafe_allow_html=True,
+            )
+        if pred_job and str(pred_job.get("status")) == "done" and pred_job.get("result"):
+            st.session_state.grok_prediction = pred_job.get("result")
+            st.session_state.pred_et_big = extract_predicted_et(pred_job.get("result"))
+            if pred_job.get("extra"):
+                st.session_state.pred_wx_used = pred_job.get("extra")
+            st.success("Prediction ready")
+        if pred_job and str(pred_job.get("status")) == "error":
+            st.error(pred_job.get("error") or "Prediction failed")
         if st.session_state.get("pred_et_big") is not None:
             st.markdown(
                 f"<div class='ss-et'><span>PREDICTED ET</span>{float(st.session_state.pred_et_big):.3f}</div>",
@@ -2254,4 +2357,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.32")
+st.caption("Smart Slip v2.8.36")
