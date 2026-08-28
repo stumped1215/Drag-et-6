@@ -469,54 +469,38 @@ def canonicalize_track(name):
 
 def render_track_picker(prefix: str):
     last_track = st.session_state.get("last_pred_track") or "Numidia Dragway"
-    nonce_key = f"{prefix}_track_nonce"
-    virgin_key = f"{prefix}_track_virgin"
-    typed_key = f"{prefix}_track_typed"
-    if nonce_key not in st.session_state:
-        st.session_state[nonce_key] = 0
-    typed = st.text_input(
+    labels = {}
+    names = []
+    for name, city, region in TRACK_LIBRARY:
+        labels[name] = f"{name} — {city}, {region}"
+        names.append(name)
+    for extra in list(TRACKS.keys()) + list(st.session_state.get("saved_tracks") or []):
+        if extra and extra not in labels and extra != "Other / Custom":
+            labels[extra] = extra
+            names.append(extra)
+    options = []
+    if last_track:
+        options.append(last_track)
+        labels.setdefault(last_track, last_track)
+    for name in sorted(set(names)):
+        if name != last_track:
+            options.append(name)
+    picked = st.selectbox(
         "Drag Strip",
-        value=last_track if st.session_state.get(virgin_key, True) else st.session_state.get(typed_key, last_track),
-        key=f"{prefix}_track_box_{st.session_state[nonce_key]}",
+        options,
+        index=0 if last_track in options else None,
+        accept_new_options=True,
+        format_func=lambda n: labels.get(n, n),
+        key=f"{prefix}_track_select",
     )
-    if (
-        st.session_state.get(virgin_key, True)
-        and last_track
-        and typed != last_track
-        and last_track.startswith(typed)
-    ):
-        st.session_state[virgin_key] = False
-        st.session_state[typed_key] = ""
-        st.session_state[nonce_key] += 1
-        st.rerun()
-    if typed != last_track:
-        st.session_state[virgin_key] = False
-    st.session_state[typed_key] = typed
-    pred_track = (typed or "").strip()
-    hits = suggest_tracks(pred_track, limit=8) if len(pred_track) >= 2 and pred_track.lower() != last_track.lower() else []
-    if hits:
-        labels = [lab for _, lab in hits]
-        pick = st.selectbox(
-            "Matches",
-            labels,
-            index=None,
-            placeholder="Tap a match",
-            key=f"{prefix}_dd_{st.session_state[nonce_key]}_{pred_track.lower()}",
-        )
-        if pick:
-            pred_track = next((n for n, lab in hits if lab == pick), pick)
-            st.session_state[typed_key] = pred_track
-            st.session_state.last_pred_track = pred_track
-            st.session_state[virgin_key] = False
-            st.session_state[nonce_key] += 1
-            st.rerun()
+    pred_track = canonicalize_track(picked) or (picked or "").strip()
     if pred_track:
         saved = list(st.session_state.get("saved_tracks") or [])
         if pred_track not in saved:
             saved.append(pred_track)
             st.session_state.saved_tracks = saved
-        st.session_state.last_pred_track = canonicalize_track(pred_track) or pred_track
-    return canonicalize_track(pred_track) or pred_track
+        st.session_state.last_pred_track = pred_track
+    return pred_track
 
 def fetch_weather_for_track(track_name):
     rec = find_track(track_name)
@@ -1321,7 +1305,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.24 • Auto Log • Weather • Predict</p>
+    <p>v2.8.25 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2124,4 +2108,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.24")
+st.caption("Smart Slip v2.8.25")
