@@ -14,6 +14,7 @@ from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from typing import Optional
 import threading
+import time
 import io
 from PIL import Image, ImageOps, ImageFilter
 
@@ -186,6 +187,12 @@ st.markdown("""
     animation: ss-pulse 1.1s ease-in-out infinite;
   }
   .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
+  .ss-bar { height: 8px; background: rgba(0,0,0,.22); border-radius: 8px; overflow: hidden; margin: 14px 18px 0; }
+  .ss-bar i { display:block; height:100%; width:38%; background:#111; border-radius:8px; animation: ss-slide 1.15s infinite ease-in-out; }
+  @keyframes ss-slide {
+    0% { transform: translateX(-120%); }
+    100% { transform: translateX(320%); }
+  }
   .ss-ok {
     background: #1f9d55;
     color: #fff;
@@ -470,7 +477,7 @@ def weather_looks_sane(wx: dict) -> bool:
             return False
     except Exception:
         return False
-    return wx.get("temp_f") not in [None, ""]
+    return wx.get("temp_f") not in [None, ""] and wx.get("altimeter_inhg") not in [None, ""]
 
 def extract_predicted_et(text: str):
     if not text:
@@ -491,8 +498,8 @@ def rh_from_temp_dew(temp_c, dew_c):
 
 def fetch_weather(icao):
     try:
-        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=2"
-        r = requests.get(url, timeout=8)
+        url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=3"
+        r = requests.get(url, timeout=8, headers={"User-Agent": "SmartSlip/2.8 (drag racing weather)"})
         if r.status_code == 200:
             data = r.json()
             if data and len(data) > 0:
@@ -500,7 +507,14 @@ def fetch_weather(icao):
                 temp_c = m.get("temp")
                 dew_c = m.get("dewp")
                 temp_f = round(temp_c * 9/5 + 32, 1) if temp_c is not None else None
-                altim = round(m["altim_in_hg"], 2) if m.get("altim_in_hg") is not None else None
+                altim = m.get("altim_in_hg")
+                if altim is None:
+                    altim = pressure_to_inhg(m.get("altim"))
+                if altim is None:
+                    raw = str(m.get("rawOb") or "")
+                    am = re.search(r"\bA(\d{4})\b", raw)
+                    if am:
+                        altim = round(int(am.group(1)) / 100.0, 2)
                 humidity = rh_from_temp_dew(temp_c, dew_c) if temp_c is not None and dew_c is not None else 50
                 wx = {"temp_f": temp_f, "altimeter_inhg": altim, "humidity_pct": humidity, "icao": icao}
                 extra = calculate_weather(temp_f, altim, humidity)
@@ -559,6 +573,48 @@ def render_track_picker(prefix: str):
         st.caption(f"Using **{pred_track}**")
     return pred_track
 
+def fetch_weather_noaa(lat, lon):
+    try:
+        headers = {"User-Agent": "SmartSlip/2.8 (drag racing weather)", "Accept": "application/geo+json"}
+        pts = requests.get(f"https://api.weather.gov/points/{lat:.3f},{lon:.3f}", timeout=8, headers=headers)
+        if pts.status_code != 200:
+            return None
+        stations = (pts.json().get("properties") or {}).get("observationStations")
+        if not stations:
+            return None
+        stn = requests.get(stations, timeout=8, headers=headers)
+        if stn.status_code != 200:
+            return None
+        feats = (stn.json() or {}).get("features") or []
+        if not feats:
+            return None
+        sid = (feats[0].get("properties") or {}).get("stationIdentifier") or feats[0].get("id")
+        obs_url = feats[0].get("id")
+        if obs_url:
+            latest = requests.get(obs_url.rstrip("/") + "/observations/latest", timeout=8, headers=headers)
+        else:
+            return None
+        if latest.status_code != 200:
+            return None
+        p = (latest.json() or {}).get("properties") or {}
+        temp_c = (p.get("temperature") or {}).get("value")
+        dew_c = (p.get("dewpoint") or {}).get("value")
+        rh = (p.get("relativeHumidity") or {}).get("value")
+        pres = (p.get("barometricPressure") or {}).get("value") or (p.get("seaLevelPressure") or {}).get("value")
+        temp_f = round(temp_c * 9/5 + 32, 1) if temp_c is not None else None
+        if rh is None and temp_c is not None and dew_c is not None:
+            rh = rh_from_temp_dew(temp_c, dew_c)
+        # NOAA pressure is Pa
+        altim = None
+        if pres is not None:
+            altim = pressure_to_inhg(float(pres) / 100.0)
+        wx = {"temp_f": temp_f, "humidity_pct": rh, "altimeter_inhg": altim, "weather_source": f"NWS {sid or ''}"}
+        extra = calculate_weather(temp_f, altim, rh or 50)
+        wx.update(extra)
+        return wx if weather_looks_sane(wx) else None
+    except Exception:
+        return None
+
 def fetch_weather_for_track(track_name):
     rec = find_track(track_name)
     if not rec:
@@ -598,29 +654,37 @@ def fetch_weather_for_track(track_name):
             "&temperature_unit=fahrenheit"
         )
         r = requests.get(url, timeout=8)
-        if r.status_code != 200:
-            return None
-        cur = (r.json() or {}).get("current") or {}
-        temp_f = cur.get("temperature_2m")
-        humidity = cur.get("relative_humidity_2m")
-        altim = pressure_to_inhg(cur.get("pressure_msl") if cur.get("pressure_msl") is not None else cur.get("surface_pressure"))
-        elev = rec.get("elev_ft") or 400
-        wx = {
-            "temp_f": temp_f,
-            "humidity_pct": humidity,
-            "altimeter_inhg": altim,
-            "track": rec["name"],
-            "address": rec["address"],
-            "elev_ft": elev,
-            "weather_source": f"Open-Meteo {float(lat):.3f},{float(lon):.3f}",
-        }
-        extra = calculate_weather(wx["temp_f"], wx["altimeter_inhg"], wx["humidity_pct"] or 50, elev)
-        wx.update(extra)
-        if not weather_looks_sane(wx):
-            return None
-        return wx
-    except Exception:
+        if r.status_code == 200:
+            cur = (r.json() or {}).get("current") or {}
+            temp_f = cur.get("temperature_2m")
+            humidity = cur.get("relative_humidity_2m")
+            altim = pressure_to_inhg(cur.get("pressure_msl") if cur.get("pressure_msl") is not None else cur.get("surface_pressure"))
+            wx = {
+                "temp_f": temp_f,
+                "humidity_pct": humidity,
+                "altimeter_inhg": altim,
+                "track": rec["name"],
+                "address": rec["address"],
+                "elev_ft": elev,
+                "weather_source": f"Open-Meteo {float(lat):.3f},{float(lon):.3f}",
+            }
+            extra = calculate_weather(wx["temp_f"], wx["altimeter_inhg"], wx["humidity_pct"] or 50, elev)
+            wx.update(extra)
+            if weather_looks_sane(wx):
+                return wx
+        nws = fetch_weather_noaa(lat, lon)
+        if nws:
+            nws["track"] = rec["name"]
+            nws["address"] = rec.get("address")
+            nws["elev_ft"] = elev
+            extra = calculate_weather(nws.get("temp_f"), nws.get("altimeter_inhg"), nws.get("humidity_pct") or 50, elev)
+            nws.update(extra)
+            if weather_looks_sane(nws):
+                return nws
         return None
+    except Exception:
+        nws = fetch_weather_noaa(lat, lon) if lat is not None else None
+        return nws
 
 def parse_import_block(block):
     data = {}
@@ -1231,6 +1295,30 @@ def read_job(job_id):
         pass
     return PRED_PROMPTS.get(job_id)
 
+def latest_user_job(user, kind):
+    user = str(user or "").strip().lower()
+    best = None
+    for rec in list(PRED_PROMPTS.values()):
+        if str(rec.get("kind")) == kind and str(rec.get("user") or "").strip().lower() == user:
+            if best is None or str(rec.get("id")) > str(best.get("id")):
+                best = rec
+    ws = get_jobs_ws()
+    if ws is not None:
+        try:
+            for rec in ws.get_all_records():
+                if str(rec.get("kind")) == kind and str(rec.get("user") or "").strip().lower() == user:
+                    if best is None or str(rec.get("id")) > str(best.get("id")):
+                        best = rec
+        except Exception:
+            pass
+    return best
+
+def wait_banner(title):
+    st.markdown(
+        f"<div class='ss-wait'>{title}<span>Stay in the app until this finishes</span><div class='ss-bar'><i></i></div></div>",
+        unsafe_allow_html=True,
+    )
+
 def _auto_worker(job_id, prompt, img_bytes, ctx):
     try:
         result, err = call_grok(prompt, image_bytes=img_bytes)
@@ -1520,7 +1608,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.36 • Auto Log • Weather • Predict</p>
+    <p>v2.8.38 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1767,10 +1855,9 @@ notes=
     if auto_job:
         stt = str(auto_job.get("status") or "")
         if stt == "running":
-            st.markdown(
-                "<div class='ss-wait'>SMART SLIP READING<span>Stay in the app until this finishes</span></div>",
-                unsafe_allow_html=True,
-            )
+            wait_banner("SMART SLIP READING")
+            time.sleep(2)
+            st.rerun()
         elif stt == "done":
             et_s = auto_job.get("result") or ""
             extra = auto_job.get("extra") or ""
@@ -2045,20 +2132,25 @@ Why: two short sentences max.
                     ).start()
                     st.rerun()
         pred_job = read_job(st.session_state.get("pred_job_id"))
+        if not pred_job:
+            pred_job = latest_user_job(st.session_state.get("user_email") or st.session_state.get("user_name"), "predict")
         if pred_job and str(pred_job.get("status")) == "running":
-            st.markdown(
-                "<div class='ss-wait'>SMART SLIP PREDICTING<span>Stay in the app until this finishes</span></div>",
-                unsafe_allow_html=True,
-            )
+            wait_banner("SMART SLIP PREDICTING")
+            time.sleep(2)
+            st.rerun()
         if pred_job and str(pred_job.get("status")) == "done" and pred_job.get("result"):
             st.session_state.grok_prediction = pred_job.get("result")
             st.session_state.pred_et_big = extract_predicted_et(pred_job.get("result"))
             if pred_job.get("extra"):
                 st.session_state.pred_wx_used = pred_job.get("extra")
-            st.success("Prediction ready")
+            if st.session_state.get("pred_shown_id") != str(pred_job.get("id")):
+                st.success("Prediction ready")
+                st.session_state.pred_shown_id = str(pred_job.get("id"))
         if pred_job and str(pred_job.get("status")) == "error":
             st.error(pred_job.get("error") or "Prediction failed")
-        if st.session_state.get("pred_et_big") is not None:
+        if pred_job and str(pred_job.get("status")) == "running":
+            pass
+        elif st.session_state.get("pred_et_big") is not None:
             st.markdown(
                 f"<div class='ss-et'><span>PREDICTED ET</span>{float(st.session_state.pred_et_big):.3f}</div>",
                 unsafe_allow_html=True,
@@ -2357,4 +2449,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.36")
+st.caption("Smart Slip v2.8.38")
