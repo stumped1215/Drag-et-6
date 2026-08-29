@@ -2677,16 +2677,29 @@ if st.session_state.nav == "Log Book":
                     tlab = time_only(r0)
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
-                    label = (
-                        f"{tlab:<10}{'60\'':<10}{'330\'':<10}{finish_l}\n"
-                        f"{'':<10}{s60:<10}{s330:<10}{finish_v}"
-                    )
-                    if st.button(label, key=f"pick_{rid}", use_container_width=True, type="secondary"):
+                    clicked = False
+                    with st.container(border=True):
+                        c_time, c_60, c_330, c_fin = st.columns([1.25, 1, 1, 1.5])
+                        with c_time:
+                            clicked = st.button(tlab, key=f"pick_t_{rid}", use_container_width=True) or clicked
+                        with c_60:
+                            st.caption("60'")
+                            clicked = st.button(s60, key=f"pick_60_{rid}", use_container_width=True) or clicked
+                        with c_330:
+                            st.caption("330'")
+                            clicked = st.button(s330, key=f"pick_330_{rid}", use_container_width=True) or clicked
+                        with c_fin:
+                            st.caption(finish_l)
+                            clicked = st.button(finish_v, key=f"pick_f_{rid}", use_container_width=True) or clicked
+                    if clicked:
                         cur = str(st.session_state.get("log_pick") or "")
                         st.session_state.log_pick = "" if cur == rid else rid
                         st.rerun()
                     if str(st.session_state.get("log_pick") or "") == rid:
                         r = r0
+                    else:
+                        r = None
+                    if r:
                         extra = []
                         if r.get("dial") not in [None, ""]:
                             extra.append(f"Dial {fmt(r.get('dial'), 3)}")
