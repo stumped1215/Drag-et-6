@@ -203,19 +203,22 @@ st.markdown("""
     letter-spacing: .02em;
   }
   .ss-rest { color:#e8e4d8; font-variant-numeric: tabular-nums; font-weight: 600; }
-  div[data-testid="stExpander"] button {
+  div[data-testid="stExpander"] div.stButton > button {
     white-space: pre !important;
     text-align: left !important;
     justify-content: flex-start !important;
+    align-items: flex-start !important;
     display: flex !important;
     font-variant-numeric: tabular-nums;
     line-height: 1.35;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
   }
-  div[data-testid="stExpander"] button p {
+  div[data-testid="stExpander"] div.stButton > button p,
+  div[data-testid="stExpander"] div.stButton > button div {
     text-align: left !important;
-    width: 100%;
-    margin: 0;
+    width: 100% !important;
+    margin: 0 !important;
+    white-space: pre !important;
   }
   .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
   .ss-bar { height: 8px; background: rgba(0,0,0,.22); border-radius: 8px; overflow: hidden; margin: 14px 18px 0; }
@@ -1948,7 +1951,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.64 • Auto Log • Weather • Predict</p>
+    <p>v2.8.65 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2677,10 +2680,18 @@ if st.session_state.nav == "Log Book":
                     tlab = time_only(r0)
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
-                    label = (
-                        f"{tlab:<10}{'60\'':<10}{'330\'':<10}{finish_l}\n"
-                        f"{'':<10}{s60:<10}{s330:<10}{finish_v}"
-                    )
+                    def _pad(s, n):
+                        s = str(s)
+                        return s + ("\u00a0" * max(0, n - len(s)))
+                    if finish_l == "1/4":
+                        e8 = eighth if eighth != "—" else fmt(r0.get("eighth_et"), 3)
+                        k1 = fmt(r0.get("thousand_et"), 3)
+                        line1 = _pad(tlab, 9) + _pad("60'", 8) + _pad("1/8", 8) + _pad("1000'", 8) + "1/4"
+                        line2 = _pad("", 9) + _pad(s60, 8) + _pad(e8, 8) + _pad(k1, 8) + finish_v
+                    else:
+                        line1 = _pad(tlab, 9) + _pad("60'", 9) + _pad("330'", 9) + "1/8"
+                        line2 = _pad("", 9) + _pad(s60, 9) + _pad(s330, 9) + finish_v
+                    label = f"{line1}\n{line2}"
                     if st.button(label, key=f"pick_{rid}", use_container_width=True, type="secondary"):
                         cur = str(st.session_state.get("log_pick") or "")
                         st.session_state.log_pick = "" if cur == rid else rid
@@ -2891,4 +2902,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.64")
+st.caption("Smart Slip v2.8.65")
