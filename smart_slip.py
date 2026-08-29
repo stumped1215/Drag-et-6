@@ -1449,11 +1449,44 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
     try:
         t0 = time.perf_counter()
         result, err = call_grok(prompt, image_bytes=img_bytes, model="grok-4-fast", max_tokens=350)
-        log_timing("auto", ctx.get("user"), time.perf_counter() - t0, ok=not bool(err), extra=(err or "")[:80])
-        if err or not result:
+        log_timing("auto", ctx.get("user"), time.perf_counter() - t0, ok=not bool(err), extra="fast")
+        data = parse_import_block(result) if result and not err else {}
+
+        def _swap_rt_sixty(d):
+            if not d:
+                return d
+            try:
+                rt = float(d["reaction_time"]) if d.get("reaction_time") not in [None, ""] else None
+                s60 = float(d["sixty_ft"]) if d.get("sixty_ft") not in [None, ""] else None
+                dial = float(d["dial"]) if d.get("dial") not in [None, ""] else None
+            except Exception:
+                return d
+            if s60 is None and rt is not None and 1.15 <= rt <= 2.40:
+                if dial is None or 0.001 <= abs(dial) <= 0.999:
+                    d["sixty_ft"] = rt
+                    d["reaction_time"] = dial
+                    d["dial"] = None
+            return d
+
+        data = _swap_rt_sixty(data)
+
+        def _has_finish(d):
+            return d.get("et") not in [None, ""] or d.get("eighth_et") not in [None, ""]
+
+        def _has_sixty(d):
+            return d.get("sixty_ft") not in [None, ""]
+
+        weak = (not data) or (not _has_sixty(data)) or (not _has_finish(data))
+        if weak:
+            t1 = time.perf_counter()
+            result2, err2 = call_grok(prompt, image_bytes=img_bytes, model="grok-4.6", max_tokens=350)
+            log_timing("auto-4.6", ctx.get("user"), time.perf_counter() - t1, ok=not bool(err2), extra="retry")
+            data2 = _swap_rt_sixty(parse_import_block(result2) if result2 and not err2 else {})
+            if data2 and (_has_sixty(data2) or _has_finish(data2) or not data):
+                data, err, result = data2, err2, result2
+        if err and not data:
             write_job(job_id, ctx.get("user"), "auto", "error", error=err or "Could not read the slip")
             return
-        data = parse_import_block(result)
         if not data:
             write_job(job_id, ctx.get("user"), "auto", "error", error="Could not read the slip. Try a clearer photo.")
             return
@@ -1511,6 +1544,7 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
         except Exception:
             pass
         write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=track or "")
+        PRED_PROMPTS.setdefault(job_id, {})["run"] = new_run
     except Exception as e:
         write_job(job_id, ctx.get("user"), "auto", "error", error=str(e))
 
@@ -1739,7 +1773,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.54 • Auto Log • Weather • Predict</p>
+    <p>v2.8.55 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2039,8 +2073,12 @@ notes=
         elif stt == "done":
             st.session_state.auto_busy = False
             if st.session_state.get("auto_reloaded") != str(auto_job.get("id")):
-                st.session_state.data_loaded = False
-                load_data_from_sheet()
+                saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
+                if saved:
+                    runs = list(st.session_state.get("runs") or [])
+                    if not any(str(x.get("id")) == str(saved.get("id")) for x in runs):
+                        runs.insert(0, saved)
+                        st.session_state.runs = runs
                 st.session_state.auto_reloaded = str(auto_job.get("id"))
             et_s = auto_job.get("result") or ""
             extra = auto_job.get("extra") or ""
@@ -2655,4 +2693,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.54")
+st.caption("Smart Slip v2.8.55")
