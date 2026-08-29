@@ -206,8 +206,16 @@ st.markdown("""
   div[data-testid="stExpander"] button {
     white-space: pre !important;
     text-align: left !important;
+    justify-content: flex-start !important;
+    display: flex !important;
     font-variant-numeric: tabular-nums;
-    line-height: 1.3;
+    line-height: 1.35;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  }
+  div[data-testid="stExpander"] button p {
+    text-align: left !important;
+    width: 100%;
+    margin: 0;
   }
   .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
   .ss-bar { height: 8px; background: rgba(0,0,0,.22); border-radius: 8px; overflow: hidden; margin: 14px 18px 0; }
@@ -1940,7 +1948,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.60 • Auto Log • Weather • Predict</p>
+    <p>v2.8.61 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2671,10 +2679,10 @@ if st.session_state.nav == "Log Book":
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
                     label = (
-                        f"{tlab:<9}{'60\'':^11}{'330\'':^11}{finish_l}\n"
-                        f"{'':<9}{s60:^11}{s330:^11}{finish_v}"
+                        f"{tlab:<10}{'60\'':<10}{'330\'':<10}{finish_l}\n"
+                        f"{'':<10}{s60:<10}{s330:<10}{finish_v}"
                     )
-                    if st.button(label, key=f"pick_{rid}", use_container_width=True, type="primary" if latest else "secondary"):
+                    if st.button(label, key=f"pick_{rid}", use_container_width=True, type="secondary"):
                         cur = str(st.session_state.get("log_pick") or "")
                         st.session_state.log_pick = "" if cur == rid else rid
                         st.rerun()
@@ -2884,4 +2892,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.60")
+st.caption("Smart Slip v2.8.61")
