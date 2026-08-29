@@ -203,6 +203,12 @@ st.markdown("""
     letter-spacing: .02em;
   }
   .ss-rest { color:#e8e4d8; font-variant-numeric: tabular-nums; font-weight: 600; }
+  div[data-testid="stExpander"] button {
+    white-space: pre !important;
+    text-align: left !important;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.3;
+  }
   .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
   .ss-bar { height: 8px; background: rgba(0,0,0,.22); border-radius: 8px; overflow: hidden; margin: 14px 18px 0; }
   .ss-bar i { display:block; height:100%; width:38%; background:#111; border-radius:8px; animation: ss-slide 1.15s infinite ease-in-out; }
@@ -1934,7 +1940,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.58 • Auto Log • Weather • Predict</p>
+    <p>v2.8.60 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2657,71 +2663,74 @@ if st.session_state.nav == "Log Book":
                         quarter = fmt(r0.get("et"), 3)
                         if r0.get("trap_mph") not in [None, ""]:
                             quarter += f" @ {fmt(r0.get('trap_mph'), 1)}"
-                    finish = quarter if quarter != "—" else eighth
-                    stripe = "odd" if i % 2 else "even"
-                    if i == len(day_runs) - 1:
-                        stripe += " latest"
-                    rest = f"60 {fmt(r0.get('sixty_ft'), 3)}   330 {fmt(r0.get('three_thirty_ft'), 3)}   {finish}"
-                    st.markdown(
-                        f"<div class='ss-runrow {stripe}'><span class='ss-time'>{time_only(r0)}</span>"
-                        f"<span class='ss-rest'>{rest}</span></div>",
-                        unsafe_allow_html=True,
+                    finish_l = "1/4" if quarter != "—" else "1/8"
+                    finish_v = quarter if quarter != "—" else eighth
+                    rid = str(r0.get("id"))
+                    latest = i == len(day_runs) - 1
+                    tlab = time_only(r0)
+                    s60 = fmt(r0.get("sixty_ft"), 3)
+                    s330 = fmt(r0.get("three_thirty_ft"), 3)
+                    label = (
+                        f"{tlab:<9}{'60\'':^11}{'330\'':^11}{finish_l}\n"
+                        f"{'':<9}{s60:^11}{s330:^11}{finish_v}"
                     )
-                    if st.button("Open", key=f"pick_{r0.get('id')}", use_container_width=True):
-                        st.session_state.log_pick = str(r0.get("id"))
-                picked_id = str(st.session_state.get("log_pick") or "")
-                r = next((x for x in day_runs if str(x.get("id")) == picked_id), None)
-                if r:
-                    extra = []
-                    if r.get("dial") not in [None, ""]:
-                        extra.append(f"Dial {fmt(r.get('dial'), 3)}")
-                    if r.get("reaction_time") not in [None, ""]:
-                        extra.append(f"R/T {fmt(r.get('reaction_time'), 3)}")
-                    if r.get("mov") not in [None, ""]:
-                        extra.append(f"MOV {fmt(r.get('mov'), 3)}")
-                    if extra:
-                        st.caption(" · ".join(extra))
-                    st.write(
-                        f"Temp {fmt(r.get('temp_f'), 1)}°F · "
-                        f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
-                        f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
-                        f"Grains {fmt(r.get('water_grains'), 1)} · "
-                        f"Air {fmt(r.get('air_density_pct'), 2)}% · "
-                        f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
-                    )
-                    note = clean_notes(r.get("notes"))
-                    edited_notes = st.text_area(
-                        "Notes (spin / lift / brakes)",
-                        value=note,
-                        key=f"notes_{r.get('id')}",
-                        height=80,
-                    )
-                    if st.button("Save notes", key=f"savenotes_{r.get('id')}", use_container_width=True):
-                        r["notes"] = (edited_notes or "").strip()
-                        for x in st.session_state.runs or []:
-                            if str(x.get("id")) == str(r.get("id")):
-                                x["notes"] = r["notes"]
-                                break
-                        ok = update_run_in_sheet(r)
-                        if ok:
-                            st.success("Notes saved.")
-                        else:
-                            st.error("Could not save notes to the sheet.")
-                    excluded = str(r.get("excluded") or "").lower() in ["yes", "true", "1"]
-                    if excluded:
-                        st.caption("Excluded from predictions.")
-                    cdel, cexc = st.columns(2)
-                    with cexc:
-                        label = "Include in predictions" if excluded else "Exclude from predictions"
-                        if st.button(label, key=f"exc_{r.get('id')}"):
-                            r["excluded"] = "" if excluded else "yes"
-                            set_run_excluded(r.get("id"), not excluded)
-                            st.rerun()
-                    with cdel:
-                        if st.button("Delete this run", key=f"delrun_{r.get('id')}"):
-                            st.session_state.runs = [x for x in st.session_state.runs if str(x.get("id")) != str(r.get("id"))]
-                            delete_run_from_sheet(r.get("id"))
-                            st.rerun()
+                    if st.button(label, key=f"pick_{rid}", use_container_width=True, type="primary" if latest else "secondary"):
+                        cur = str(st.session_state.get("log_pick") or "")
+                        st.session_state.log_pick = "" if cur == rid else rid
+                        st.rerun()
+                    if str(st.session_state.get("log_pick") or "") == rid:
+                        r = r0
+                        extra = []
+                        if r.get("dial") not in [None, ""]:
+                            extra.append(f"Dial {fmt(r.get('dial'), 3)}")
+                        if r.get("reaction_time") not in [None, ""]:
+                            extra.append(f"R/T {fmt(r.get('reaction_time'), 3)}")
+                        if r.get("mov") not in [None, ""]:
+                            extra.append(f"MOV {fmt(r.get('mov'), 3)}")
+                        if extra:
+                            st.caption(" · ".join(extra))
+                        st.write(
+                            f"Temp {fmt(r.get('temp_f'), 1)}°F · "
+                            f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
+                            f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
+                            f"Grains {fmt(r.get('water_grains'), 1)} · "
+                            f"Air {fmt(r.get('air_density_pct'), 2)}% · "
+                            f"Vapor {fmt(r.get('vapor_pressure'), 3)}"
+                        )
+                        note = clean_notes(r.get("notes"))
+                        edited_notes = st.text_area(
+                            "Notes (spin / lift / brakes)",
+                            value=note,
+                            key=f"notes_{r.get('id')}",
+                            height=80,
+                        )
+                        if st.button("Save notes", key=f"savenotes_{r.get('id')}", use_container_width=True):
+                            r["notes"] = (edited_notes or "").strip()
+                            for x in st.session_state.runs or []:
+                                if str(x.get("id")) == str(r.get("id")):
+                                    x["notes"] = r["notes"]
+                                    break
+                            ok = update_run_in_sheet(r)
+                            if ok:
+                                st.success("Notes saved.")
+                            else:
+                                st.error("Could not save notes to the sheet.")
+                        excluded = str(r.get("excluded") or "").lower() in ["yes", "true", "1"]
+                        if excluded:
+                            st.caption("Excluded from predictions.")
+                        cdel, cexc = st.columns(2)
+                        with cexc:
+                            elabel = "Include in predictions" if excluded else "Exclude from predictions"
+                            if st.button(elabel, key=f"exc_{r.get('id')}"):
+                                r["excluded"] = "" if excluded else "yes"
+                                set_run_excluded(r.get("id"), not excluded)
+                                st.rerun()
+                        with cdel:
+                            if st.button("Delete this run", key=f"delrun_{r.get('id')}"):
+                                st.session_state.runs = [x for x in st.session_state.runs if str(x.get("id")) != str(r.get("id"))]
+                                delete_run_from_sheet(r.get("id"))
+                                st.session_state.log_pick = ""
+                                st.rerun()
 
 # ====================== SETTINGS ======================
 if st.session_state.nav == "Settings":
@@ -2875,4 +2884,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.58")
+st.caption("Smart Slip v2.8.60")
