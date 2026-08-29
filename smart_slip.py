@@ -1988,7 +1988,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.68 • Auto Log • Weather • Predict</p>
+    <p>v2.8.69 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2619,9 +2619,10 @@ Why: two short sentences max.
 # ====================== HISTORY ======================
 if st.session_state.nav == "Log Book":
     st.subheader("Log Book")
-    if "log_pick" not in st.session_state:
-        st.session_state.log_pick = ""
-    st.caption("Tap a run for weather and notes. Tap that same run again to close it.")
+    if "log_open" not in st.session_state:
+        old = str(st.session_state.get("log_pick") or "")
+        st.session_state.log_open = [old] if old else []
+    st.caption("Tap a run for weather and notes. Tap it again to close just that run.")
     runs = list(st.session_state.runs or [])
     if not runs:
         st.info("No runs found yet.")
@@ -2702,8 +2703,8 @@ if st.session_state.nav == "Log Book":
             day, _, track = key
             car = folder_name(day_runs[0])
             preview = " · ".join([p for p in [car, track, f"{len(day_runs)} runs"] if p])
-            open_in_folder = any(str(r.get("id")) == str(st.session_state.get("log_pick") or "") for r in day_runs)
-            with st.expander(f"{day} · {preview}", expanded=open_in_folder):
+            fold_key = f"lb_{day}_{car}_{track}"
+            with st.expander(f"{day} · {preview}", expanded=False, key=fold_key):
                 for i, r0 in enumerate(day_runs):
                     eighth = "—"
                     if r0.get("eighth_et") not in [None, ""]:
@@ -2721,7 +2722,7 @@ if st.session_state.nav == "Log Book":
                     tlab = time_only(r0)
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
-                    opened = str(st.session_state.get("log_pick") or "") == rid
+                    opened = rid in [str(x) for x in (st.session_state.get("log_open") or [])]
                     if finish_l == "1/4":
                         e8 = eighth if eighth != "—" else fmt(r0.get("eighth_et"), 3)
                         k1 = fmt(r0.get("thousand_et"), 3)
@@ -2742,12 +2743,14 @@ if st.session_state.nav == "Log Book":
                         unsafe_allow_html=True,
                     )
                     if st.button(" ", key=f"pick_{rid}", use_container_width=True):
-                        if opened:
-                            st.session_state.log_pick = ""
+                        opens = [str(x) for x in (st.session_state.get("log_open") or [])]
+                        if rid in opens:
+                            opens = [x for x in opens if x != rid]
                         else:
-                            st.session_state.log_pick = rid
+                            opens.append(rid)
+                        st.session_state.log_open = opens
                         st.rerun()
-                    r = r0 if str(st.session_state.get("log_pick") or "") == rid else None
+                    r = r0 if rid in [str(x) for x in (st.session_state.get("log_open") or [])] else None
                     if r:
                         extra = []
                         if r.get("dial") not in [None, ""]:
@@ -2798,7 +2801,10 @@ if st.session_state.nav == "Log Book":
                             if st.button("Delete this run", key=f"delrun_{r.get('id')}"):
                                 st.session_state.runs = [x for x in st.session_state.runs if str(x.get("id")) != str(r.get("id"))]
                                 delete_run_from_sheet(r.get("id"))
-                                st.session_state.log_pick = ""
+                                st.session_state.log_open = [
+                                    x for x in (st.session_state.get("log_open") or [])
+                                    if str(x) != str(r.get("id"))
+                                ]
                                 st.rerun()
 
 # ====================== SETTINGS ======================
@@ -2953,4 +2959,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.68")
+st.caption("Smart Slip v2.8.69")
