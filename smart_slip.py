@@ -1948,7 +1948,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.61 • Auto Log • Weather • Predict</p>
+    <p>v2.8.63 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2904,4 +2904,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.61")
+st.caption("Smart Slip v2.8.63")
