@@ -188,10 +188,21 @@ st.markdown("""
   }
   [data-testid="stElementToolbar"] { display: none !important; }
   .ss-runrow {
-    display:flex; justify-content:space-between; gap:8px;
-    padding:12px 10px; margin:6px 0; border-radius:10px;
-    background:#17344a; color:#eee; font-size:.92rem; font-weight:600;
+    display:flex; align-items:baseline; gap:12px;
+    padding:12px 12px; margin:6px 0; border-radius:10px;
+    color:#eee; font-size:.95rem; font-weight:600;
   }
+  .ss-runrow.even { background:#17344a; }
+  .ss-runrow.odd { background:#102536; }
+  .ss-runrow.latest { box-shadow: inset 4px 0 0 #e8c547; }
+  .ss-time {
+    min-width: 5.6rem;
+    color:#e8c547;
+    font-variant-numeric: tabular-nums;
+    font-weight: 800;
+    letter-spacing: .02em;
+  }
+  .ss-rest { color:#e8e4d8; font-variant-numeric: tabular-nums; font-weight: 600; }
   .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
   .ss-bar { height: 8px; background: rgba(0,0,0,.22); border-radius: 8px; overflow: hidden; margin: 14px 18px 0; }
   .ss-bar i { display:block; height:100%; width:38%; background:#111; border-radius:8px; animation: ss-slide 1.15s infinite ease-in-out; }
@@ -1923,7 +1934,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.57 • Auto Log • Weather • Predict</p>
+    <p>v2.8.58 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2575,9 +2586,23 @@ if st.session_state.nav == "Log Book":
                 return f"{d} {t}".strip()
             return d or "—"
 
-        def time_only(r):
+        def parse_clock(r):
             t = str(r.get("time") or "").strip()
-            return t if t else "—"
+            for fmt in ("%I:%M:%S %p", "%I:%M %p", "%H:%M:%S", "%H:%M"):
+                try:
+                    return datetime.strptime(t, fmt).time()
+                except Exception:
+                    continue
+            return None
+
+        def time_only(r):
+            tm = parse_clock(r)
+            if not tm:
+                raw = str(r.get("time") or "").strip()
+                raw = re.sub(r":\d{2}(?=\s*[APap][Mm])", "", raw)
+                return raw or "—"
+            s = datetime.combine(datetime.today(), tm).strftime("%I:%M %p")
+            return s.lstrip("0")
 
         def fmt(v, digits=None):
             if v in [None, ""]:
@@ -2613,12 +2638,15 @@ if st.session_state.nav == "Log Book":
         folders = sorted(by_folder.keys(), key=lambda k: (k[0], k[1], k[2]), reverse=True)
 
         for key in folders:
-            day_runs = sorted(by_folder[key], key=lambda r: str(r.get("time") or ""), reverse=True)
+            day_runs = sorted(
+                by_folder[key],
+                key=lambda r: parse_clock(r) or datetime.min.time(),
+            )
             day, _, track = key
             car = folder_name(day_runs[0])
             preview = " · ".join([p for p in [car, track, f"{len(day_runs)} runs"] if p])
             with st.expander(f"{day} · {preview}", expanded=False):
-                for r0 in day_runs:
+                for i, r0 in enumerate(day_runs):
                     eighth = "—"
                     if r0.get("eighth_et") not in [None, ""]:
                         eighth = fmt(r0.get("eighth_et"), 3)
@@ -2630,8 +2658,16 @@ if st.session_state.nav == "Log Book":
                         if r0.get("trap_mph") not in [None, ""]:
                             quarter += f" @ {fmt(r0.get('trap_mph'), 1)}"
                     finish = quarter if quarter != "—" else eighth
-                    label = f"{time_only(r0)}   60 {fmt(r0.get('sixty_ft'), 3)}   330 {fmt(r0.get('three_thirty_ft'), 3)}   {finish}"
-                    if st.button(label, key=f"pick_{r0.get('id')}", use_container_width=True):
+                    stripe = "odd" if i % 2 else "even"
+                    if i == len(day_runs) - 1:
+                        stripe += " latest"
+                    rest = f"60 {fmt(r0.get('sixty_ft'), 3)}   330 {fmt(r0.get('three_thirty_ft'), 3)}   {finish}"
+                    st.markdown(
+                        f"<div class='ss-runrow {stripe}'><span class='ss-time'>{time_only(r0)}</span>"
+                        f"<span class='ss-rest'>{rest}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("Open", key=f"pick_{r0.get('id')}", use_container_width=True):
                         st.session_state.log_pick = str(r0.get("id"))
                 picked_id = str(st.session_state.get("log_pick") or "")
                 r = next((x for x in day_runs if str(x.get("id")) == picked_id), None)
@@ -2839,4 +2875,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.57")
+st.caption("Smart Slip v2.8.58")
