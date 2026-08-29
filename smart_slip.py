@@ -203,6 +203,31 @@ st.markdown("""
     letter-spacing: .02em;
   }
   .ss-rest { color:#e8e4d8; font-variant-numeric: tabular-nums; font-weight: 600; }
+  a.ss-runlink { text-decoration:none; color:inherit; display:block; margin:6px 0; }
+  .ss-runbar {
+    display:flex; align-items:center; gap:8px;
+    padding:10px 10px; border-radius:12px;
+    background:#17344a; color:#eee;
+  }
+  .ss-runbar.on { background:#1f4a66; box-shadow: inset 3px 0 0 #e8c547; }
+  .ss-runbar .ss-time {
+    flex:0 0 74px; width:74px;
+    color:#e8c547; font-weight:800; font-size:.92rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .ss-runbar .ss-grid {
+    flex:1; display:flex; justify-content:space-between; min-width:0;
+  }
+  .ss-runbar .ss-grid > div {
+    flex:1; text-align:center; min-width:0;
+  }
+  .ss-runbar .ss-grid span {
+    display:block; font-size:.68rem; opacity:.65; font-weight:600;
+  }
+  .ss-runbar .ss-grid b {
+    display:block; font-size:.82rem; font-weight:700;
+    font-variant-numeric: tabular-nums;
+  }
   div[data-testid="stExpander"] div.stButton > button {
     white-space: pre !important;
     text-align: left !important;
@@ -1951,7 +1976,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.65 • Auto Log • Weather • Predict</p>
+    <p>v2.8.66 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2582,6 +2607,16 @@ Why: two short sentences max.
 # ====================== HISTORY ======================
 if st.session_state.nav == "Log Book":
     st.subheader("Log Book")
+    try:
+        lp = st.query_params.get("lp")
+        if isinstance(lp, list):
+            lp = lp[0] if lp else ""
+        if lp not in [None, ""]:
+            st.session_state.log_pick = str(lp)
+        elif "lp" in st.query_params:
+            st.session_state.log_pick = ""
+    except Exception:
+        pass
     runs = list(st.session_state.runs or [])
     if not runs:
         st.info("No runs found yet.")
@@ -2680,23 +2715,27 @@ if st.session_state.nav == "Log Book":
                     tlab = time_only(r0)
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
-                    def _pad(s, n):
-                        s = str(s)
-                        return s + ("\u00a0" * max(0, n - len(s)))
+                    opened = str(st.session_state.get("log_pick") or "") == rid
                     if finish_l == "1/4":
                         e8 = eighth if eighth != "—" else fmt(r0.get("eighth_et"), 3)
                         k1 = fmt(r0.get("thousand_et"), 3)
-                        line1 = _pad(tlab, 9) + _pad("60'", 8) + _pad("1/8", 8) + _pad("1000'", 8) + "1/4"
-                        line2 = _pad("", 9) + _pad(s60, 8) + _pad(e8, 8) + _pad(k1, 8) + finish_v
+                        cells = [("60'", s60), ("1/8", e8), ("1000'", k1), ("1/4", finish_v)]
                     else:
-                        line1 = _pad(tlab, 9) + _pad("60'", 9) + _pad("330'", 9) + "1/8"
-                        line2 = _pad("", 9) + _pad(s60, 9) + _pad(s330, 9) + finish_v
-                    label = f"{line1}\n{line2}"
-                    if st.button(label, key=f"pick_{rid}", use_container_width=True, type="secondary"):
-                        cur = str(st.session_state.get("log_pick") or "")
-                        st.session_state.log_pick = "" if cur == rid else rid
-                        st.rerun()
-                    r = r0 if str(st.session_state.get("log_pick") or "") == rid else None
+                        cells = [("60'", s60), ("330'", s330), ("1/8", finish_v)]
+                    grid = "".join(
+                        f"<div><span>{lab}</span><b>{val}</b></div>" for lab, val in cells
+                    )
+                    href = "?lp=" if opened else f"?lp={rid}"
+                    on = " on" if opened else ""
+                    st.markdown(
+                        f"<a class='ss-runlink' href='{href}'>"
+                        f"<div class='ss-runbar{on}'>"
+                        f"<div class='ss-time'>{tlab}</div>"
+                        f"<div class='ss-grid'>{grid}</div>"
+                        f"</div></a>",
+                        unsafe_allow_html=True,
+                    )
+                    r = r0 if opened else None
                     if r:
                         extra = []
                         if r.get("dial") not in [None, ""]:
@@ -2902,4 +2941,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.65")
+st.caption("Smart Slip v2.8.66")
