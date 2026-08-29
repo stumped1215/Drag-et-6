@@ -2674,7 +2674,6 @@ if st.session_state.nav == "Log Book":
                     finish_l = "1/4" if quarter != "—" else "1/8"
                     finish_v = quarter if quarter != "—" else eighth
                     rid = str(r0.get("id"))
-                    latest = i == len(day_runs) - 1
                     tlab = time_only(r0)
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
