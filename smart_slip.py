@@ -174,8 +174,8 @@ st.markdown("""
   }
   .ss-wait, .ss-ok, .ss-bad {
     text-align: center;
-    padding: 28px 16px;
-    border-radius: 16px;
+    padding: 14px 14px;
+    border-radius: 14px;
     margin: 8px 0 16px 0;
     font-weight: 800;
     letter-spacing: .04em;
@@ -183,8 +183,14 @@ st.markdown("""
   .ss-wait {
     background: #c9a227;
     color: #111;
-    font-size: 1.35rem;
+    font-size: 1.05rem;
     animation: ss-pulse 1.1s ease-in-out infinite;
+  }
+  [data-testid="stElementToolbar"] { display: none !important; }
+  .ss-runrow {
+    display:flex; justify-content:space-between; gap:8px;
+    padding:12px 10px; margin:6px 0; border-radius:10px;
+    background:#17344a; color:#eee; font-size:.92rem; font-weight:600;
   }
   .ss-wait span { display:block; font-size: .95rem; font-weight: 600; margin-top: 8px; }
   .ss-bar { height: 8px; background: rgba(0,0,0,.22); border-radius: 8px; overflow: hidden; margin: 14px 18px 0; }
@@ -561,7 +567,16 @@ def _wx_from_metar(m, icao, elev=400):
     wx["weather_source"] = f"METAR {icao}" + (f" @ {obs.strftime('%H:%M')}Z" if obs else "")
     return wx
 
+_METAR_CACHE = {}
+
 def fetch_weather(icao, when=None, elev=400):
+    if not when and icao in _METAR_CACHE:
+        ts, cached = _METAR_CACHE[icao]
+        if time.time() - ts < 900:
+            wx = dict(cached)
+            extra = calculate_weather(wx.get("temp_f"), wx.get("altimeter_inhg"), wx.get("humidity_pct") or 50, elev)
+            wx.update(extra)
+            return wx if weather_looks_sane(wx) else None
     try:
         hours = 18 if when else 4
         url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours={hours}"
@@ -583,7 +598,11 @@ def fetch_weather(icao, when=None, elev=400):
                     best, best_diff = row, diff
             m = best
         wx = _wx_from_metar(m, icao, elev)
-        return wx if weather_looks_sane(wx) else None
+        if weather_looks_sane(wx):
+            if not when:
+                _METAR_CACHE[icao] = (time.time(), dict(wx))
+            return wx
+        return None
     except Exception:
         return None
 
@@ -700,13 +719,133 @@ def fetch_weather_for_track(track_name, when=None):
                 break
     if not icao:
         return None
-    metar = fetch_weather(icao, when=when, elev=elev)
-    if not metar:
+    old = False
+    try:
+        old = when and (datetime.utcnow() - when).total_seconds() > 72 * 3600
+    except Exception:
+        old = bool(when)
+    metar = None if old else fetch_weather(icao, when=when, elev=elev)
+    wx = metar if weather_looks_sane(metar or {}) else None
+    if not wx and when:
+        wx = fetch_weather_iem(icao, when, elev)
+    if not wx and old:
+        wx = fetch_weather(icao, when=when, elev=elev)
+    if not wx:
         return None
-    metar["track"] = rec.get("name") or track_name
-    metar["address"] = rec.get("address")
-    metar["elev_ft"] = elev
-    return metar if weather_looks_sane(metar) else None
+    wx["track"] = rec.get("name") or track_name
+    wx["address"] = rec.get("address")
+    wx["elev_ft"] = elev
+    return wx if weather_looks_sane(wx) else None
+
+def fetch_weather_iem(icao, when, elev=400):
+    if not icao or not when:
+        return None
+    try:
+        stn = icao[1:] if len(icao) == 4 and icao[0] in "KC" else icao
+        t1 = when - timedelta(hours=2)
+        t2 = when + timedelta(hours=2)
+        url = (
+            "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+            f"?station={stn}&data=tmpf&data=dwpf&data=alti&data=relh"
+            f"&year1={t1.year}&month1={t1.month}&day1={t1.day}&hour1={t1.hour}"
+            f"&year2={t2.year}&month2={t2.month}&day2={t2.day}&hour2={t2.hour}"
+            "&tz=Etc/UTC&format=onlycomma&latlon=no&elev=no&missing=null&trace=null&direct=no"
+        )
+        r = requests.get(url, timeout=10, headers={"User-Agent": "SmartSlip/2.8"})
+        if r.status_code != 200 or not r.text:
+            return None
+        lines = [ln for ln in r.text.splitlines() if ln and not ln.startswith("#")]
+        if len(lines) < 2:
+            return None
+        headers = [h.strip() for h in lines[0].split(",")]
+        best, best_diff = None, None
+        for ln in lines[1:]:
+            parts = [p.strip() for p in ln.split(",")]
+            row = dict(zip(headers, parts))
+            raw_t = row.get("valid") or row.get("timestamp") or ""
+            odt = None
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    odt = datetime.strptime(raw_t[:19], fmt)
+                    break
+                except Exception:
+                    continue
+            if not odt:
+                continue
+            diff = abs((odt - when).total_seconds())
+            if best_diff is None or diff < best_diff:
+                best, best_diff = row, diff
+        if not best:
+            return None
+        def _f(k):
+            try:
+                v = best.get(k)
+                return None if v in [None, "", "null", "M"] else float(v)
+            except Exception:
+                return None
+        temp_f = _f("tmpf")
+        rh = _f("relh")
+        altim = _f("alti")
+        dew = _f("dwpf")
+        if rh is None and temp_f is not None and dew is not None:
+            rh = rh_from_temp_dew((temp_f - 32) * 5 / 9, (dew - 32) * 5 / 9)
+        wx = {"temp_f": temp_f, "altimeter_inhg": altim, "humidity_pct": rh or 50, "icao": icao}
+        extra = calculate_weather(temp_f, altim, wx["humidity_pct"], elev)
+        wx.update(extra)
+        wx["weather_source"] = f"IEM METAR {icao}"
+        return wx if weather_looks_sane(wx) else None
+    except Exception:
+        return None
+
+MESSY_NOTES = re.compile(r"\b(spin|spun|lift|lifted|womp|brake|brakes|braking)\b", re.I)
+
+def run_is_messy(r):
+    return bool(MESSY_NOTES.search(str((r or {}).get("notes") or "")))
+
+def weather_match_score(run, target_da, target_grains):
+    score, n = 0.0, 0
+    try:
+        if target_da not in [None, ""] and run.get("density_altitude") not in [None, ""]:
+            score += abs(float(run["density_altitude"]) - float(target_da)) / 250.0
+            n += 1
+    except Exception:
+        pass
+    try:
+        if target_grains not in [None, ""] and run.get("water_grains") not in [None, ""]:
+            score += abs(float(run["water_grains"]) - float(target_grains)) / 10.0
+            n += 1
+    except Exception:
+        pass
+    return 999.0 if n == 0 else score / n
+
+def pick_similar_runs(runs, wx, limit=6):
+    runs = list(runs or [])
+    if not runs:
+        return []
+    da = (wx or {}).get("density_altitude")
+    gr = (wx or {}).get("water_grains")
+    if da in [None, ""] and gr in [None, ""]:
+        return runs[-limit:]
+    return sorted(runs, key=lambda r: weather_match_score(r, da, gr))[:limit]
+
+def metar_age_line(wx_bits, wx=None):
+    src = ""
+    if wx:
+        src = str(wx.get("weather_source") or "")
+    if not src and wx_bits:
+        src = str(wx_bits)
+    m = re.search(r"@\s*(\d{1,2}):(\d{2})\s*Z", src)
+    if not m:
+        return src
+    try:
+        now = datetime.utcnow()
+        obs = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+        if obs > now:
+            obs = obs - timedelta(days=1)
+        mins = int((now - obs).total_seconds() // 60)
+        return f"{src} ({mins} min old)"
+    except Exception:
+        return src
 
 def parse_import_block(block):
     data = {}
@@ -790,7 +929,7 @@ def get_xai_api_key():
     except Exception:
         return None
 
-def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6", max_tokens: int = 400):
+def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6", max_tokens: int = 400, reasoning_effort: str = None):
     """Call Grok via xAI API. Supports optional image for vision."""
     client = get_xai_client()
     if client is None:
@@ -810,12 +949,23 @@ def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6", m
         else:
             messages.append({"role": "user", "content": prompt})
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=max_tokens,
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+        }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except TypeError:
+            kwargs.pop("reasoning_effort", None)
+            kwargs.pop("extra_body", None)
+            if reasoning_effort:
+                kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+            response = client.chat.completions.create(**kwargs)
         return response.choices[0].message.content, None
     except Exception as e:
         return None, str(e)
@@ -1420,7 +1570,7 @@ def latest_user_job(user, kind):
 
 def wait_banner(title):
     st.markdown(
-        f"<div class='ss-wait'>{title}<span>Stay in the app until this finishes</span><div class='ss-bar'><i></i></div></div>",
+        f"<div class='ss-wait'>{title}<span>Stay in the app</span><div class='ss-bar'><i></i></div></div>",
         unsafe_allow_html=True,
     )
 
@@ -1479,7 +1629,7 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
         weak = (not data) or (not _has_sixty(data)) or (not _has_finish(data))
         if weak:
             t1 = time.perf_counter()
-            result2, err2 = call_grok(prompt, image_bytes=img_bytes, model="grok-4.6", max_tokens=350)
+            result2, err2 = call_grok(prompt, image_bytes=img_bytes, model="grok-4.6", max_tokens=350, reasoning_effort="low")
             log_timing("auto-4.6", ctx.get("user"), time.perf_counter() - t1, ok=not bool(err2), extra="retry")
             data2 = _swap_rt_sixty(parse_import_block(result2) if result2 and not err2 else {})
             if data2 and (_has_sixty(data2) or _has_finish(data2) or not data):
@@ -1551,7 +1701,7 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
 def _predict_worker(job_id, prompt, user, wx_bits):
     try:
         t0 = time.perf_counter()
-        result, err = call_grok(prompt, model="grok-4.6", max_tokens=220)
+        result, err = call_grok(prompt, model="grok-4.6", max_tokens=220, reasoning_effort="low")
         log_timing("predict", user, time.perf_counter() - t0, ok=not bool(err), extra=(err or "")[:80])
         if err:
             write_job(job_id, user, "predict", "error", extra=wx_bits or "", error=err)
@@ -1773,7 +1923,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.55 • Auto Log • Weather • Predict</p>
+    <p>v2.8.57 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2067,7 +2217,7 @@ notes=
     if auto_job:
         stt = str(auto_job.get("status") or "")
         if stt == "running":
-            wait_banner("SMART SLIP READING")
+            wait_banner("Reading slip…")
             time.sleep(2)
             st.rerun()
         elif stt == "done":
@@ -2225,15 +2375,17 @@ if st.session_state.nav == "Predict":
             )
             and str(r.get("excluded") or "").lower() not in ["yes", "true", "1"]
         ]
+        include_messy = st.checkbox("Include spin / lift / womp / brakes passes", value=False, key="pred_include_messy")
+        if not include_messy:
+            vehicle_runs = [r for r in vehicle_runs if not run_is_messy(r)]
         pred_track = render_track_picker("pred")
         prof = get_profile_by_id(selected_pid) or {}
         if len(vehicle_runs) < 2:
-            st.info("Need at least 2 logged runs for this car before predicting.")
+            st.info("Need at least 2 logged runs for this car before predicting. Include messy passes if those are the only ones.")
         elif st.button("Ask Smart Slip for Prediction", type="primary", use_container_width=True):
             if not get_xai_client():
                 st.error("Smart Slip is not connected. Add XAI_API_KEY to Streamlit Secrets first.")
             else:
-                recent = vehicle_runs[-8:]
                 wx_bits = ""
                 wx_err = None
                 with st.spinner("Pulling weather and dialing it in..."):
@@ -2305,7 +2457,8 @@ if st.session_state.nav == "Predict":
                             f"now DA {wx.get('density_altitude') or extra.get('density_altitude')} ft. "
                             f"Move ET using THIS car's own change with DA/grains, not a generic rule.\n"
                         )
-                    prompt += "\nLogged runs for THIS car only (do not mix cars or users):\n"
+                    recent = pick_similar_runs(vehicle_runs, wx, 6)
+                    prompt += "\nLogged runs for THIS car only, closest weather to now (do not mix cars or users):\n"
                     for r in recent:
                         etv = r.get("et")
                         et_txt = f"{float(etv):.3f}s" if etv not in [None, ""] else "—"
@@ -2361,7 +2514,7 @@ Why: two short sentences max.
         if not pred_job:
             pred_job = latest_user_job(st.session_state.get("user_email") or st.session_state.get("user_name"), "predict")
         if pred_job and str(pred_job.get("status")) == "running":
-            wait_banner("SMART SLIP PREDICTING")
+            wait_banner("Predicting…")
             time.sleep(2)
             st.rerun()
         if pred_job and str(pred_job.get("status")) == "done" and pred_job.get("result"):
@@ -2381,11 +2534,22 @@ Why: two short sentences max.
                 f"<div class='ss-et'><span>PREDICTED ET</span>{float(st.session_state.pred_et_big):.3f}</div>",
                 unsafe_allow_html=True,
             )
+            st.code(f"{float(st.session_state.pred_et_big):.3f}", language=None)
+            st.caption("Tap the copy icon on that number for the lanes.")
         if st.session_state.get("pred_wx_used"):
-            st.caption(st.session_state.pred_wx_used)
+            st.caption(metar_age_line(st.session_state.pred_wx_used))
         if st.session_state.grok_prediction:
-            st.markdown("### Details")
-            st.write(st.session_state.grok_prediction)
+            with st.expander("Why", expanded=False):
+                st.write(st.session_state.grok_prediction)
+            if st.button("This prediction was off", key="pred_junk"):
+                log_timing(
+                    "pred-feedback",
+                    st.session_state.get("user_email") or st.session_state.get("user_name"),
+                    0,
+                    ok=False,
+                    extra=f"et={st.session_state.get('pred_et_big')} {(st.session_state.grok_prediction or '')[:120]}",
+                )
+                st.warning("Saved. We’ll use this to tighten Predict.")
 
 # ====================== HISTORY ======================
 if st.session_state.nav == "Log Book":
@@ -2454,7 +2618,6 @@ if st.session_state.nav == "Log Book":
             car = folder_name(day_runs[0])
             preview = " · ".join([p for p in [car, track, f"{len(day_runs)} runs"] if p])
             with st.expander(f"{day} · {preview}", expanded=False):
-                grid = []
                 for r0 in day_runs:
                     eighth = "—"
                     if r0.get("eighth_et") not in [None, ""]:
@@ -2466,29 +2629,12 @@ if st.session_state.nav == "Log Book":
                         quarter = fmt(r0.get("et"), 3)
                         if r0.get("trap_mph") not in [None, ""]:
                             quarter += f" @ {fmt(r0.get('trap_mph'), 1)}"
-                    grid.append({
-                        "Time": time_only(r0),
-                        "60'": fmt(r0.get("sixty_ft"), 3),
-                        "330'": fmt(r0.get("three_thirty_ft"), 3),
-                        "1/8": eighth,
-                        "1000'": fmt(r0.get("thousand_et"), 3),
-                        "1/4": quarter,
-                        "DA": fmt(r0.get("density_altitude"), 0),
-                    })
-                event = st.dataframe(
-                    pd.DataFrame(grid),
-                    hide_index=True,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="single-row",
-                    key=f"grid_{day}_{key[1]}_{key[2]}",
-                )
-                picked_idx = []
-                try:
-                    picked_idx = list(event.selection.rows)
-                except Exception:
-                    picked_idx = []
-                r = day_runs[picked_idx[0]] if picked_idx else None
+                    finish = quarter if quarter != "—" else eighth
+                    label = f"{time_only(r0)}   60 {fmt(r0.get('sixty_ft'), 3)}   330 {fmt(r0.get('three_thirty_ft'), 3)}   {finish}"
+                    if st.button(label, key=f"pick_{r0.get('id')}", use_container_width=True):
+                        st.session_state.log_pick = str(r0.get("id"))
+                picked_id = str(st.session_state.get("log_pick") or "")
+                r = next((x for x in day_runs if str(x.get("id")) == picked_id), None)
                 if r:
                     extra = []
                     if r.get("dial") not in [None, ""]:
@@ -2693,4 +2839,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.55")
+st.caption("Smart Slip v2.8.57")
