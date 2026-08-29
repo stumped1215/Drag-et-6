@@ -381,6 +381,8 @@ if "import_success" not in st.session_state:
     st.session_state.import_success = False
 if "last_imported" not in st.session_state:
     st.session_state.last_imported = None
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
 if "show_all_history" not in st.session_state:
     st.session_state.show_all_history = False
 if "grok_prediction" not in st.session_state:
@@ -1988,7 +1990,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.69 • Auto Log • Weather • Predict</p>
+    <p>v2.8.70 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1999,6 +2001,19 @@ if COOKIE_AVAILABLE:
         cookies = CookieManager(key="ss_cookie_mgr")
     except Exception:
         cookies = None
+
+try:
+    cookie_theme = ""
+    try:
+        cookie_theme = str(st.context.cookies.get("smartslip_theme") or "")
+    except Exception:
+        cookie_theme = ""
+    if cookie_theme not in ["light", "dark"] and cookies is not None:
+        cookie_theme = str(cookies.get("smartslip_theme") or "")
+    if cookie_theme in ["light", "dark"] and "theme_radio" not in st.session_state:
+        st.session_state.theme = cookie_theme
+except Exception:
+    pass
 
 def _restore_from_saved(saved):
     if not isinstance(saved, str) or "|" not in saved:
@@ -2035,6 +2050,15 @@ if st.session_state.get("auth_persist") and cookies is not None:
 if st.session_state.get("auth_clear") and cookies is not None:
     try:
         cookies.delete("smartslip_auth")
+    except Exception:
+        pass
+if cookies is not None:
+    try:
+        cookies.set(
+            "smartslip_theme",
+            st.session_state.get("theme") or "dark",
+            expires_at=datetime.now() + timedelta(days=365),
+        )
     except Exception:
         pass
 
@@ -2142,6 +2166,25 @@ with st.sidebar:
     if st.button("Refresh Data"):
         st.session_state.data_loaded = False
         st.rerun()
+
+if st.session_state.get("theme") == "light":
+    st.markdown("""
+    <style>
+      .stApp { background: #f4f1e8 !important; color: #161616 !important; }
+      .block-container, [data-testid="stAppViewContainer"] { background: #f4f1e8 !important; color: #161616 !important; }
+      h1, h2, h3, p, label, .stMarkdown, .stCaption { color: #161616 !important; }
+      .ss-runbar { background:#d9e3ea !important; color:#161616 !important; }
+      .ss-runbar.on { background:#c7d6e0 !important; }
+      .ss-runbar .ss-time, .ss-runbar .ss-chev { color:#8a6a10 !important; }
+      .ss-et { color:#8a6a10 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <style>
+      .stApp { background: #0e0e0e !important; }
+    </style>
+    """, unsafe_allow_html=True)
 
 labels = ["Auto Log", "Manual Log", "Predict", "Log Book", "Settings"]
 if "nav" not in st.session_state or st.session_state.nav in ["Photo", "Log", "History"]:
@@ -2420,15 +2463,26 @@ if st.session_state.nav == "Manual Log":
 # ====================== PREDICT + GROK ======================
 if st.session_state.nav == "Predict":
     st.subheader("Predict ET with Smart Slip")
-    profiles = list(st.session_state.get("car_profiles") or [])[:2]
+    if st.session_state.get("is_admin"):
+        st.caption("Admin: every car profile is available here.")
+    all_profiles = list(st.session_state.get("car_profiles") or [])
+    if st.session_state.get("is_admin"):
+        profiles = sorted(all_profiles, key=lambda p: (str(p.get("user") or "").lower(), str(p.get("name") or "").lower()))
+    else:
+        profiles = all_profiles[:2]
     if not profiles:
         st.info("Create a car profile in Settings first.")
     else:
         profile_opts = {str(p.get("id")): p.get("name") for p in profiles}
+        profile_users = {str(p.get("id")): str(p.get("user") or "") for p in profiles}
         selected_pid = st.selectbox(
             "Car",
             list(profile_opts.keys()),
-            format_func=lambda i: profile_opts.get(i, i),
+            format_func=lambda i: (
+                f"{profile_opts.get(i, i)} · {profile_users.get(i)}"
+                if st.session_state.get("is_admin") and profile_users.get(i)
+                else profile_opts.get(i, i)
+            ),
             key="pred_vehicle",
         )
         selected_vehicle = profile_opts.get(selected_pid, "")
@@ -2814,10 +2868,26 @@ if st.session_state.nav == "Settings":
     if st.button("Log out", type="primary"):
         clear_login(cookies)
         st.rerun()
+    st.markdown("### Appearance")
+    theme_choice = st.radio(
+        "Theme",
+        ["Dark", "Light"],
+        index=0 if st.session_state.get("theme") != "light" else 1,
+        horizontal=True,
+        key="theme_radio",
+    )
+    new_theme = "light" if theme_choice == "Light" else "dark"
+    if new_theme != st.session_state.get("theme"):
+        st.session_state.theme = new_theme
+        st.session_state.theme_persist = new_theme
+        st.rerun()
     if st.session_state.get("last_sheet_error"):
         st.error(f"Sheet: {st.session_state.last_sheet_error}")
     st.markdown("### Create Car Profile")
-    st.caption("You can have 2 active profiles. Delete one to add another.")
+    if st.session_state.get("is_admin"):
+        st.caption("Admin can keep every profile. Regular users are limited to 2.")
+    else:
+        st.caption("You can have 2 active profiles. Delete one to add another.")
     with st.expander("New Profile", expanded=len(st.session_state.car_profiles) < 2):
         name = st.text_input("Profile Name", key="prof_name")
         st.caption("This name cannot be changed later.")
@@ -2833,7 +2903,7 @@ if st.session_state.nav == "Settings":
         first_gear = st.number_input("1st Gear Ratio", value=defaults["trans_first_gear"], step=0.05, format="%.2f", key=f"prof_first_{car_type}")
         rear_gear = st.number_input("Rear Gear Ratio", value=defaults["rear_gear"], step=0.05, format="%.2f", key=f"prof_rear_{car_type}")
         if st.button("Create Profile", key="create_prof"):
-            if len(st.session_state.car_profiles) >= 2:
+            if (not st.session_state.get("is_admin")) and len(st.session_state.car_profiles) >= 2:
                 st.error("You can only have 2 active profiles. Delete one first if you need a new one.")
             elif name.strip():
                 profile = {
@@ -2959,4 +3029,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.69")
+st.caption("Smart Slip v2.8.70")
