@@ -72,6 +72,8 @@ st.markdown("""
 <meta name="apple-mobile-web-app-title" content="Smart Slip">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0e0e0e">
+<meta name="color-scheme" content="dark">
+<meta name="supported-color-schemes" content="dark">
 """, unsafe_allow_html=True)
 
 st.markdown(f"""
@@ -110,7 +112,20 @@ st.markdown("""
   [data-testid="stAppDeployButton"], .stAppDeployButton,
   .viewerBadge_container__r5tak, .viewerBadge_linkContainer__q7KiB,
   [data-testid="manageAppButton"] { display: none !important; }
-  .stApp { background: #0e0e0e; }
+  :root, html, body, .stApp { color-scheme: dark only; background: #0e0e0e; color: #f2efe6; }
+  .stApp { background: #0e0e0e !important; color: #f2efe6 !important; }
+  [data-testid="stAppViewContainer"],
+  [data-testid="stHeader"],
+  .block-container,
+  .stMarkdown, .stMarkdown p, .stMarkdown span,
+  [data-testid="stCaption"],
+  [data-testid="stWidgetLabel"],
+  label, p, h1, h2, h3, h4, li {
+    color: #f2efe6 !important;
+  }
+  [data-testid="stCaption"], small, .stCaption {
+    color: #c8c3b4 !important;
+  }
   .block-container {
     padding-top: 0.6rem !important;
     padding-bottom: 5.8rem !important;
@@ -1990,7 +2005,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.71 • Auto Log • Weather • Predict</p>
+    <p>v2.8.72 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2170,9 +2185,11 @@ with st.sidebar:
 if st.session_state.get("theme") == "light":
     st.markdown("""
     <style>
+      :root, html, body, .stApp { color-scheme: light only; }
       .stApp { background: #f4f1e8 !important; color: #161616 !important; }
       .block-container, [data-testid="stAppViewContainer"] { background: #f4f1e8 !important; color: #161616 !important; }
-      h1, h2, h3, p, label, .stMarkdown, .stCaption { color: #161616 !important; }
+      h1, h2, h3, h4, p, label, li, .stMarkdown, .stMarkdown p,
+      [data-testid="stCaption"], [data-testid="stWidgetLabel"] { color: #161616 !important; }
       .ss-runbar { background:#d9e3ea !important; color:#161616 !important; }
       .ss-runbar.on { background:#c7d6e0 !important; }
       .ss-runbar .ss-time, .ss-runbar .ss-chev { color:#8a6a10 !important; }
@@ -2182,7 +2199,12 @@ if st.session_state.get("theme") == "light":
 else:
     st.markdown("""
     <style>
-      .stApp { background: #0e0e0e !important; }
+      :root, html, body, .stApp { color-scheme: dark only; }
+      .stApp { background: #0e0e0e !important; color: #f2efe6 !important; }
+      .block-container, [data-testid="stAppViewContainer"] { background: #0e0e0e !important; color: #f2efe6 !important; }
+      h1, h2, h3, h4, p, label, li, .stMarkdown, .stMarkdown p,
+      [data-testid="stWidgetLabel"] { color: #f2efe6 !important; }
+      [data-testid="stCaption"], .stCaption, small { color: #c8c3b4 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -3029,4 +3051,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.71")
+st.caption("Smart Slip v2.8.72")
