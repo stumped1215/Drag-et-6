@@ -1990,7 +1990,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.70 • Auto Log • Weather • Predict</p>
+    <p>v2.8.71 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2564,6 +2564,7 @@ if st.session_state.nav == "Predict":
                         prompt += f"Current weather at the strip: {wx_bits}\n"
                     elif wx_err:
                         prompt += "Weather lookup failed. Predict from run history only and say weather was unavailable.\n"
+                    recent = pick_similar_runs(vehicle_runs, wx, 6)
                     quarter = any(r.get("et") not in [None, ""] for r in recent)
                     eighth_only = (not quarter) and any(r.get("eighth_et") not in [None, ""] for r in recent)
                     race_len = "1/4 mile" if quarter else ("1/8 mile" if eighth_only else "unknown — infer from which ETs are filled in")
@@ -2576,7 +2577,6 @@ if st.session_state.nav == "Predict":
                             f"now DA {wx.get('density_altitude') or extra.get('density_altitude')} ft. "
                             f"Move ET using THIS car's own change with DA/grains, not a generic rule.\n"
                         )
-                    recent = pick_similar_runs(vehicle_runs, wx, 6)
                     prompt += "\nLogged runs for THIS car only, closest weather to now (do not mix cars or users):\n"
                     for r in recent:
                         etv = r.get("et")
@@ -3029,4 +3029,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.70")
+st.caption("Smart Slip v2.8.71")
