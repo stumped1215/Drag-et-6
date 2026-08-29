@@ -236,6 +236,10 @@ st.markdown("""
     display:block; font-size:.82rem; font-weight:700;
     font-variant-numeric: tabular-nums;
   }
+  .ss-runbar .ss-chev {
+    flex:0 0 18px; color:#e8c547; font-size:1.05rem; font-weight:700;
+    opacity:.85; text-align:right;
+  }
   div[data-testid="stExpander"] div.stButton > button {
     white-space: pre !important;
     text-align: left !important;
@@ -1984,7 +1988,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.67 • Auto Log • Weather • Predict</p>
+    <p>v2.8.68 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2615,6 +2619,9 @@ Why: two short sentences max.
 # ====================== HISTORY ======================
 if st.session_state.nav == "Log Book":
     st.subheader("Log Book")
+    if "log_pick" not in st.session_state:
+        st.session_state.log_pick = ""
+    st.caption("Tap a run for weather and notes. Tap that same run again to close it.")
     runs = list(st.session_state.runs or [])
     if not runs:
         st.info("No runs found yet.")
@@ -2695,7 +2702,8 @@ if st.session_state.nav == "Log Book":
             day, _, track = key
             car = folder_name(day_runs[0])
             preview = " · ".join([p for p in [car, track, f"{len(day_runs)} runs"] if p])
-            with st.expander(f"{day} · {preview}", expanded=False):
+            open_in_folder = any(str(r.get("id")) == str(st.session_state.get("log_pick") or "") for r in day_runs)
+            with st.expander(f"{day} · {preview}", expanded=open_in_folder):
                 for i, r0 in enumerate(day_runs):
                     eighth = "—"
                     if r0.get("eighth_et") not in [None, ""]:
@@ -2724,15 +2732,20 @@ if st.session_state.nav == "Log Book":
                         f"<div><span>{lab}</span><b>{val}</b></div>" for lab, val in cells
                     )
                     on = " on" if opened else ""
+                    chev = "▾" if opened else "▸"
                     st.markdown(
                         f"<div class='ss-runbar{on}'>"
                         f"<div class='ss-time'>{tlab}</div>"
                         f"<div class='ss-grid'>{grid}</div>"
+                        f"<div class='ss-chev'>{chev}</div>"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
                     if st.button(" ", key=f"pick_{rid}", use_container_width=True):
-                        st.session_state.log_pick = "" if opened else rid
+                        if opened:
+                            st.session_state.log_pick = ""
+                        else:
+                            st.session_state.log_pick = rid
                         st.rerun()
                     r = r0 if str(st.session_state.get("log_pick") or "") == rid else None
                     if r:
@@ -2940,4 +2953,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.67")
+st.caption("Smart Slip v2.8.68")
