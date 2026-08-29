@@ -203,7 +203,15 @@ st.markdown("""
     letter-spacing: .02em;
   }
   .ss-rest { color:#e8e4d8; font-variant-numeric: tabular-nums; font-weight: 600; }
-  a.ss-runlink { text-decoration:none; color:inherit; display:block; margin:6px 0; }
+  a.ss-runlink { text-decoration:none; color:inherit; display:block; margin:6px 0; pointer-events:none; }
+  div[class*="st-key-pick_"] button {
+    margin-top: -64px !important;
+    height: 64px !important;
+    background: transparent !important;
+    border: none !important;
+    color: transparent !important;
+    box-shadow: none !important;
+  }
   .ss-runbar {
     display:flex; align-items:center; gap:8px;
     padding:10px 10px; border-radius:12px;
@@ -1976,7 +1984,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.66 • Auto Log • Weather • Predict</p>
+    <p>v2.8.67 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2607,16 +2615,6 @@ Why: two short sentences max.
 # ====================== HISTORY ======================
 if st.session_state.nav == "Log Book":
     st.subheader("Log Book")
-    try:
-        lp = st.query_params.get("lp")
-        if isinstance(lp, list):
-            lp = lp[0] if lp else ""
-        if lp not in [None, ""]:
-            st.session_state.log_pick = str(lp)
-        elif "lp" in st.query_params:
-            st.session_state.log_pick = ""
-    except Exception:
-        pass
     runs = list(st.session_state.runs or [])
     if not runs:
         st.info("No runs found yet.")
@@ -2725,17 +2723,18 @@ if st.session_state.nav == "Log Book":
                     grid = "".join(
                         f"<div><span>{lab}</span><b>{val}</b></div>" for lab, val in cells
                     )
-                    href = "?lp=" if opened else f"?lp={rid}"
                     on = " on" if opened else ""
                     st.markdown(
-                        f"<a class='ss-runlink' href='{href}'>"
                         f"<div class='ss-runbar{on}'>"
                         f"<div class='ss-time'>{tlab}</div>"
                         f"<div class='ss-grid'>{grid}</div>"
-                        f"</div></a>",
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
-                    r = r0 if opened else None
+                    if st.button(" ", key=f"pick_{rid}", use_container_width=True):
+                        st.session_state.log_pick = "" if opened else rid
+                        st.rerun()
+                    r = r0 if str(st.session_state.get("log_pick") or "") == rid else None
                     if r:
                         extra = []
                         if r.get("dial") not in [None, ""]:
@@ -2941,4 +2940,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.66")
+st.caption("Smart Slip v2.8.67")
