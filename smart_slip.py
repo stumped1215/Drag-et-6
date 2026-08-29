@@ -264,6 +264,7 @@ WORKSHEET_PROFILES = "Profiles"
 WORKSHEET_USERS = "Users"
 WORKSHEET_BUGS = "Bugs"
 WORKSHEET_PREDICT = "PredictJobs"
+WORKSHEET_TIMINGS = "Timings"
 PRED_PROMPTS = {}
 AUTH_COOKIE = "smartslip_auth"
 AUTH_DAYS = 30
@@ -353,7 +354,7 @@ def prepare_slip_image(img_bytes: bytes) -> bytes:
             if img is None:
                 return img_bytes
             h, w = img.shape[:2]
-            scale = 1200 / max(h, w)
+            scale = 1000 / max(h, w)
             if scale < 1:
                 img = cv2.resize(img, (int(w * scale), int(h * scale)))
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -390,14 +391,19 @@ def prepare_slip_image(img_bytes: bytes) -> bytes:
                 l, a, b = cv2.split(lab)
                 l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
                 warped = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
-                ok, buf = cv2.imencode(".jpg", warped, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                hh2, ww2 = warped.shape[:2]
+                sc2 = 1000 / max(hh2, ww2)
+                if sc2 < 1:
+                    warped = cv2.resize(warped, (int(ww2 * sc2), int(hh2 * sc2)))
+                ok, buf = cv2.imencode(".jpg", warped, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
                 if ok:
                     return buf.tobytes()
         im = Image.open(io.BytesIO(img_bytes))
         im = ImageOps.exif_transpose(im)
+        im.thumbnail((1000, 1000))
         im = ImageOps.autocontrast(im, cutoff=2)
         out = io.BytesIO()
-        im.convert("RGB").save(out, format="JPEG", quality=92)
+        im.convert("RGB").save(out, format="JPEG", quality=78)
         return out.getvalue()
     except Exception:
         return img_bytes
@@ -784,7 +790,7 @@ def get_xai_api_key():
     except Exception:
         return None
 
-def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6"):
+def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6", max_tokens: int = 400):
     """Call Grok via xAI API. Supports optional image for vision."""
     client = get_xai_client()
     if client is None:
@@ -807,7 +813,8 @@ def call_grok(prompt: str, image_bytes: bytes = None, model: str = "grok-4.6"):
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.3
+            temperature=0.2,
+            max_tokens=max_tokens,
         )
         return response.choices[0].message.content, None
     except Exception as e:
@@ -1417,9 +1424,32 @@ def wait_banner(title):
         unsafe_allow_html=True,
     )
 
+def log_timing(kind, user, seconds, ok=True, extra=""):
+    try:
+        sheet = get_spreadsheet()
+        if sheet is None:
+            return
+        try:
+            ws = sheet.worksheet(WORKSHEET_TIMINGS)
+        except Exception:
+            ws = sheet.add_worksheet(title=WORKSHEET_TIMINGS, rows=500, cols=6)
+            ws.append_row(["when", "user", "kind", "seconds", "ok", "extra"])
+        ws.append_row([
+            datetime.now().isoformat(timespec="seconds"),
+            str(user or "")[:80],
+            kind,
+            f"{float(seconds):.1f}",
+            "yes" if ok else "no",
+            str(extra or "")[:200],
+        ], value_input_option="USER_ENTERED")
+    except Exception:
+        pass
+
 def _auto_worker(job_id, prompt, img_bytes, ctx):
     try:
-        result, err = call_grok(prompt, image_bytes=img_bytes)
+        t0 = time.perf_counter()
+        result, err = call_grok(prompt, image_bytes=img_bytes, model="grok-4-fast", max_tokens=350)
+        log_timing("auto", ctx.get("user"), time.perf_counter() - t0, ok=not bool(err), extra=(err or "")[:80])
         if err or not result:
             write_job(job_id, ctx.get("user"), "auto", "error", error=err or "Could not read the slip")
             return
@@ -1486,7 +1516,9 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
 
 def _predict_worker(job_id, prompt, user, wx_bits):
     try:
-        result, err = call_grok(prompt, model="grok-4.6")
+        t0 = time.perf_counter()
+        result, err = call_grok(prompt, model="grok-4.6", max_tokens=220)
+        log_timing("predict", user, time.perf_counter() - t0, ok=not bool(err), extra=(err or "")[:80])
         if err:
             write_job(job_id, user, "predict", "error", extra=wx_bits or "", error=err)
         else:
@@ -1707,7 +1739,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.50 • Auto Log • Weather • Predict</p>
+    <p>v2.8.54 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1904,7 +1936,7 @@ if st.session_state.nav == "Auto Log":
     )
     uploaded = st.file_uploader("Upload timeslip photo", type=["jpg", "jpeg", "png"], key="photo_upload")
 
-    notes = st.text_area("Additional Notes (spin / lift / brakes)", height=70, key="photo_notes")
+    notes = st.text_area("Additional Notes (spin / lift / brakes / deep stage / womp)", height=70, key="photo_notes")
 
     auto_running = bool(st.session_state.get("auto_busy"))
     cur_auto = read_job(st.session_state.get("auto_job_id"))
@@ -2256,7 +2288,9 @@ if st.session_state.nav == "Predict":
                     prompt += """
 Rules:
 - First decide race distance: 1/4 if a 1/4 ET exists, else 1/8 if only 1/8 data exists.
-- Notes matter. Read spin / lift / brakes / nitrous and WHEN they happened.
+- Notes matter. Read spin / lift / brakes / nitrous / deep stage / womp and WHEN they happened.
+- DEEP STAGE (staged deep): slower 60' because there is less rollout. That small 60' loss usually carries the whole ET a little slower. Do not treat a deep-stage 60' as a bad leave or a spin unless notes also say spin.
+- WOMP: lift off the throttle and go right back to full. Almost always at the finish. Slows the ET a little. Treat like a small late lift — use incrementals before the womp; the slowed finish is what it RAN, not the clean number.
 - SPIN slows the 60' and that loss usually carries the whole run. Decide if it will spin again using time of day, sun on the track, and whether prep is going away compared with this car's other runs. If a spin looks like a one-off, estimate the clean 60' from this car's clean passes and build the ET from that.
 - LIFT or BRAKES almost always happen right before the finish. 1/8-mile: lift/brakes between 330' and the 1/8. Predict from 60' and 330' only. Ignore the slowed 1/8 ET as the target.
 - LIFT or BRAKES on a 1/4-mile: almost always between 1000' and the 1/4. Predict from 60', 330', 1/8, and 1000' only. Ignore the slowed 1/4 ET as the target.
@@ -2621,4 +2655,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.50")
+st.caption("Smart Slip v2.8.54")
