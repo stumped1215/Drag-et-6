@@ -652,6 +652,7 @@ def _wx_from_metar(m, icao, elev=400):
 _METAR_CACHE = {}
 _WK_TOKEN = {"jwt": "", "exp": 0}
 _WK_CACHE = {}
+_WK_LAST = {"error": "", "status": ""}
 
 
 def _weatherkit_cfg():
@@ -690,9 +691,14 @@ def weatherkit_ready():
     return _weatherkit_cfg() is not None
 
 
+def weatherkit_last_error():
+    return str(_WK_LAST.get("error") or "").strip()
+
+
 def _weatherkit_token():
     cfg = _weatherkit_cfg()
     if not cfg:
+        _WK_LAST["error"] = "WeatherKit secrets missing (team_id, key_id, service_id, private_key)."
         return None
     now = int(time.time())
     if _WK_TOKEN["jwt"] and _WK_TOKEN["exp"] - 120 > now:
@@ -717,8 +723,10 @@ def _weatherkit_token():
             token = token.decode("utf-8")
         _WK_TOKEN["jwt"] = token
         _WK_TOKEN["exp"] = now + 3500
+        _WK_LAST["error"] = ""
         return token
-    except Exception:
+    except Exception as e:
+        _WK_LAST["error"] = f"WeatherKit JWT failed: {e}"
         return None
 
 
@@ -807,7 +815,10 @@ def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
             headers={"Authorization": f"Bearer {token}", "User-Agent": "SmartSlip/2.8"},
             timeout=10,
         )
+        _WK_LAST["status"] = str(r.status_code)
         if r.status_code != 200:
+            body = (r.text or "")[:180].replace("\n", " ")
+            _WK_LAST["error"] = f"WeatherKit HTTP {r.status_code}: {body}"
             return None
         data = r.json() or {}
         wx = None
@@ -833,11 +844,14 @@ def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
             stamp = f" @ {asof.strftime('%H:%M')}Z" if asof else ""
             wx = _wx_from_weatherkit(cur, elev, f"WeatherKit{stamp}")
         if weather_looks_sane(wx or {}):
+            _WK_LAST["error"] = ""
             if not when:
                 _WK_CACHE[cache_key] = (time.time(), dict(wx))
             return wx
+        _WK_LAST["error"] = "WeatherKit returned data that failed the sanity check."
         return None
-    except Exception:
+    except Exception as e:
+        _WK_LAST["error"] = f"WeatherKit request failed: {e}"
         return None
 
 
@@ -986,6 +1000,9 @@ def fetch_weather_noaa(lat, lon):
     except Exception:
         return None
 
+# Set True to allow airport METAR / IEM when WeatherKit fails.
+USE_METAR_FALLBACK = False
+
 def fetch_weather_for_track(track_name, when=None):
     rec = find_track(track_name)
     if not rec:
@@ -1006,7 +1023,7 @@ def fetch_weather_for_track(track_name, when=None):
     icao = rec.get("icao")
     if not icao and rec.get("name"):
         icao = TRACK_ICAO.get(str(rec.get("name") or "").lower())
-    if not wx and icao:
+    if USE_METAR_FALLBACK and (not wx) and icao:
         old = False
         try:
             old = when and (datetime.utcnow() - when).total_seconds() > 72 * 3600
@@ -2214,7 +2231,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.73 • Auto Log • Weather • Predict</p>
+    <p>v2.8.74 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2729,6 +2746,10 @@ if st.session_state.nav == "Predict":
         if not include_messy:
             vehicle_runs = [r for r in vehicle_runs if not run_is_messy(r)]
         pred_track = render_track_picker("pred")
+        if weatherkit_ready():
+            st.caption("Weather: WeatherKit only. Airport METAR is off.")
+        else:
+            st.warning("WeatherKit is not in Streamlit Secrets yet. Weather will be blank until the key is added.")
         prof = get_profile_by_id(selected_pid) or {}
         if len(vehicle_runs) < 2:
             st.info("Need at least 2 logged runs for this car before predicting. Include messy passes if those are the only ones.")
@@ -2756,7 +2777,7 @@ if st.session_state.nav == "Predict":
                     loc = tinfo.get("address") or wx.get("address") or pred_track
                     if not weather_looks_sane(wx):
                         wx_bits = ""
-                        wx_err = wx_err or "weather units invalid"
+                        wx_err = weatherkit_last_error() or wx_err or "WeatherKit returned no usable weather"
                     if weather_looks_sane(wx):
                         wx_bits = (
                             f"{tinfo.get('name') or pred_track} ({loc})"
@@ -2888,6 +2909,8 @@ Why: two short sentences max.
             st.caption("Tap the copy icon on that number for the lanes.")
         if st.session_state.get("pred_wx_used"):
             st.caption(metar_age_line(st.session_state.pred_wx_used))
+        elif weatherkit_last_error():
+            st.error(weatherkit_last_error())
         if st.session_state.grok_prediction:
             with st.expander("Why", expanded=False):
                 st.write(st.session_state.grok_prediction)
@@ -3241,9 +3264,19 @@ SMTP_FROM = "you@gmail.com"
         else:
             st.warning("Grok API key not found in Secrets.")
         if weatherkit_ready():
-            st.success("WeatherKit credentials detected. Weather uses the track pin.")
+            st.success("WeatherKit credentials detected. METAR is off — weather is WeatherKit only.")
+            if st.button("Test WeatherKit", key="wk_test"):
+                wx = fetch_weather_for_track(st.session_state.get("last_pred_track") or "Numidia Dragway")
+                if wx:
+                    st.success(
+                        f"WeatherKit OK: {wx.get('temp_f')}°F · "
+                        f"{wx.get('humidity_pct')}% · {wx.get('altimeter_inhg')} inHg · "
+                        f"{wx.get('weather_source')}"
+                    )
+                else:
+                    st.error(weatherkit_last_error() or "WeatherKit returned nothing.")
         else:
-            st.warning("WeatherKit not in Secrets yet. Weather falls back to airport METAR.")
+            st.warning("WeatherKit not in Secrets yet. METAR is off, so weather will stay blank.")
 
         st.markdown("### Google Sheets Status")
         if not GSPREAD_AVAILABLE:
@@ -3274,4 +3307,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.73")
+st.caption("Smart Slip v2.8.74")
