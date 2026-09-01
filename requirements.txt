@@ -9,3 +9,5 @@ streamlit-javascript
 opencv-python-headless
 pillow
 extra-streamlit-components
+PyJWT
+cryptography
