@@ -650,6 +650,213 @@ def _wx_from_metar(m, icao, elev=400):
     return wx
 
 _METAR_CACHE = {}
+_WK_TOKEN = {"jwt": "", "exp": 0}
+_WK_CACHE = {}
+
+
+def _weatherkit_cfg():
+    try:
+        wk = st.secrets.get("weatherkit")
+    except Exception:
+        wk = None
+    cfg = {}
+    if wk:
+        cfg = {
+            "team_id": str(wk.get("team_id") or wk.get("TEAM_ID") or "").strip(),
+            "key_id": str(wk.get("key_id") or wk.get("KEY_ID") or "").strip(),
+            "service_id": str(wk.get("service_id") or wk.get("SERVICE_ID") or "").strip(),
+            "private_key": str(wk.get("private_key") or wk.get("PRIVATE_KEY") or "").strip(),
+        }
+    else:
+        try:
+            cfg = {
+                "team_id": str(st.secrets.get("WEATHERKIT_TEAM_ID") or "").strip(),
+                "key_id": str(st.secrets.get("WEATHERKIT_KEY_ID") or "").strip(),
+                "service_id": str(st.secrets.get("WEATHERKIT_SERVICE_ID") or "").strip(),
+                "private_key": str(st.secrets.get("WEATHERKIT_PRIVATE_KEY") or "").strip(),
+            }
+        except Exception:
+            cfg = {}
+    key = (cfg.get("private_key") or "").replace("\\n", "\n")
+    if key and "BEGIN" not in key:
+        key = "-----BEGIN PRIVATE KEY-----\n" + key + "\n-----END PRIVATE KEY-----"
+    cfg["private_key"] = key
+    if not all([cfg.get("team_id"), cfg.get("key_id"), cfg.get("service_id"), cfg.get("private_key")]):
+        return None
+    return cfg
+
+
+def weatherkit_ready():
+    return _weatherkit_cfg() is not None
+
+
+def _weatherkit_token():
+    cfg = _weatherkit_cfg()
+    if not cfg:
+        return None
+    now = int(time.time())
+    if _WK_TOKEN["jwt"] and _WK_TOKEN["exp"] - 120 > now:
+        return _WK_TOKEN["jwt"]
+    try:
+        import jwt
+        token = jwt.encode(
+            {
+                "iss": cfg["team_id"],
+                "iat": now,
+                "exp": now + 3500,
+                "sub": cfg["service_id"],
+            },
+            cfg["private_key"],
+            algorithm="ES256",
+            headers={
+                "kid": cfg["key_id"],
+                "id": f"{cfg['team_id']}.{cfg['service_id']}",
+            },
+        )
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
+        _WK_TOKEN["jwt"] = token
+        _WK_TOKEN["exp"] = now + 3500
+        return token
+    except Exception:
+        return None
+
+
+def _wk_tz(region=""):
+    r = str(region or "").upper()
+    west = {"CA", "OR", "WA", "NV", "AZ", "BC"}
+    mtn = {"CO", "UT", "NM", "MT", "WY", "ID", "AB", "SK"}
+    central = {"TX", "OK", "KS", "NE", "SD", "ND", "MN", "IA", "MO", "AR", "LA", "WI", "IL", "MS", "AL", "TN", "KY", "MB"}
+    if r in west:
+        return "America/Los_Angeles"
+    if r in mtn:
+        return "America/Denver"
+    if r in central:
+        return "America/Chicago"
+    return "America/New_York"
+
+
+def _wk_hour_dt(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _wx_from_weatherkit(block, elev=400, source="WeatherKit"):
+    if not block:
+        return None
+    temp_c = block.get("temperature")
+    if temp_c is None:
+        temp_c = block.get("temperatureApparent")
+    temp_f = round(float(temp_c) * 9 / 5 + 32, 1) if temp_c is not None else None
+    hum = block.get("humidity")
+    if hum is not None:
+        hum = float(hum)
+        if hum <= 1.5:
+            hum = hum * 100.0
+        hum = round(hum)
+    pres = block.get("pressure")
+    altim = pressure_to_inhg(pres) if pres is not None else None
+    wx = {
+        "temp_f": temp_f,
+        "humidity_pct": hum if hum is not None else 50,
+        "altimeter_inhg": altim,
+        "weather_source": source,
+    }
+    extra = calculate_weather(temp_f, altim, wx["humidity_pct"], elev)
+    wx.update(extra)
+    return wx if weather_looks_sane(wx) else None
+
+
+def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
+    if lat in [None, ""] or lon in [None, ""]:
+        return None
+    token = _weatherkit_token()
+    if not token:
+        return None
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+    except Exception:
+        return None
+    cache_key = f"{round(lat_f, 3)},{round(lon_f, 3)}"
+    if not when and cache_key in _WK_CACHE:
+        ts, cached = _WK_CACHE[cache_key]
+        if time.time() - ts < 900:
+            wx = dict(cached)
+            extra = calculate_weather(wx.get("temp_f"), wx.get("altimeter_inhg"), wx.get("humidity_pct") or 50, elev)
+            wx.update(extra)
+            return wx if weather_looks_sane(wx) else None
+    try:
+        params = {
+            "dataSets": "currentWeather,forecastHourly",
+            "timezone": _wk_tz(region),
+        }
+        if when:
+            start = when - timedelta(hours=3)
+            end = when + timedelta(hours=2)
+            params["hourlyStart"] = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params["hourlyEnd"] = end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params["currentAsOf"] = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"https://weatherkit.apple.com/api/v1/weather/en/{lat_f:.4f}/{lon_f:.4f}"
+        r = requests.get(
+            url,
+            params=params,
+            headers={"Authorization": f"Bearer {token}", "User-Agent": "SmartSlip/2.8"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json() or {}
+        wx = None
+        if when:
+            hours = ((data.get("forecastHourly") or {}).get("hours")) or []
+            best, best_diff = None, None
+            for hr in hours:
+                odt = _wk_hour_dt(hr.get("forecastStart"))
+                if not odt:
+                    continue
+                diff = abs((odt - when).total_seconds())
+                if best_diff is None or diff < best_diff:
+                    best, best_diff = hr, diff
+            if best:
+                stamp = ""
+                odt = _wk_hour_dt(best.get("forecastStart"))
+                if odt:
+                    stamp = f" @ {odt.strftime('%H:%M')}Z"
+                wx = _wx_from_weatherkit(best, elev, f"WeatherKit{stamp}")
+        if not wx:
+            cur = data.get("currentWeather") or {}
+            asof = _wk_hour_dt(cur.get("asOf"))
+            stamp = f" @ {asof.strftime('%H:%M')}Z" if asof else ""
+            wx = _wx_from_weatherkit(cur, elev, f"WeatherKit{stamp}")
+        if weather_looks_sane(wx or {}):
+            if not when:
+                _WK_CACHE[cache_key] = (time.time(), dict(wx))
+            return wx
+        return None
+    except Exception:
+        return None
+
+
+def resolve_track_point(rec, track_name=""):
+    rec = dict(rec or {})
+    lat, lon = rec.get("lat"), rec.get("lon")
+    if lat in [None, ""] or lon in [None, ""]:
+        city, region = rec.get("city"), rec.get("region")
+        if city:
+            try:
+                loc = geocode_track(city, region or "")
+                if loc and loc[0] is not None:
+                    lat, lon = loc
+                    rec["lat"], rec["lon"] = lat, lon
+            except Exception:
+                pass
+    rec["lat"], rec["lon"] = lat, lon
+    rec["elev_ft"] = rec.get("elev_ft") or 400
+    return rec
 
 def fetch_weather(icao, when=None, elev=400):
     if not when and icao in _METAR_CACHE:
@@ -789,34 +996,36 @@ def fetch_weather_for_track(track_name, when=None):
             "address": (track_name or "").strip(),
             "lat": None, "lon": None, "elev_ft": 400, "icao": None,
         }
+    rec = resolve_track_point(rec, track_name)
     elev = rec.get("elev_ft") or 400
+    wx = None
+    if rec.get("lat") not in [None, ""] and rec.get("lon") not in [None, ""]:
+        wx = fetch_weather_weatherkit(
+            rec.get("lat"), rec.get("lon"), when=when, elev=elev, region=rec.get("region")
+        )
     icao = rec.get("icao")
     if not icao and rec.get("name"):
         icao = TRACK_ICAO.get(str(rec.get("name") or "").lower())
-    if not icao:
-        key = re.sub(r"[^a-z0-9]+", " ", str(track_name or "").lower()).strip()
-        for name, code in (TRACK_ICAO or {}).items():
-            if name in key or key in name:
-                icao = code
-                break
-    if not icao:
-        return None
-    old = False
-    try:
-        old = when and (datetime.utcnow() - when).total_seconds() > 72 * 3600
-    except Exception:
-        old = bool(when)
-    metar = None if old else fetch_weather(icao, when=when, elev=elev)
-    wx = metar if weather_looks_sane(metar or {}) else None
-    if not wx and when:
-        wx = fetch_weather_iem(icao, when, elev)
-    if not wx and old:
-        wx = fetch_weather(icao, when=when, elev=elev)
+    if not wx and icao:
+        old = False
+        try:
+            old = when and (datetime.utcnow() - when).total_seconds() > 72 * 3600
+        except Exception:
+            old = bool(when)
+        metar = None if old else fetch_weather(icao, when=when, elev=elev)
+        wx = metar if weather_looks_sane(metar or {}) else None
+        if not wx and when:
+            wx = fetch_weather_iem(icao, when, elev)
+        if not wx and old:
+            wx = fetch_weather(icao, when=when, elev=elev)
     if not wx:
         return None
     wx["track"] = rec.get("name") or track_name
     wx["address"] = rec.get("address")
     wx["elev_ft"] = elev
+    if rec.get("lat") not in [None, ""]:
+        wx["lat"] = rec.get("lat")
+        wx["lon"] = rec.get("lon")
     return wx if weather_looks_sane(wx) else None
 
 def fetch_weather_iem(icao, when, elev=400):
@@ -2005,7 +2214,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.72 • Auto Log • Weather • Predict</p>
+    <p>v2.8.73 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3004,6 +3213,16 @@ if st.session_state.nav == "Settings":
 
 XAI_API_KEY = "xai-your-key-here"
 
+[weatherkit]
+team_id = "YOUR10CHARTEAM"
+key_id = "YOURKEYID"
+service_id = "com.smartslip.weather"
+private_key = '''
+-----BEGIN PRIVATE KEY-----
+PASTE_P8_KEY_HERE
+-----END PRIVATE KEY-----
+'''
+
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 SMTP_USER = "you@gmail.com"
@@ -3021,6 +3240,10 @@ SMTP_FROM = "you@gmail.com"
             st.success("Grok API key detected and loaded.")
         else:
             st.warning("Grok API key not found in Secrets.")
+        if weatherkit_ready():
+            st.success("WeatherKit credentials detected. Weather uses the track pin.")
+        else:
+            st.warning("WeatherKit not in Secrets yet. Weather falls back to airport METAR.")
 
         st.markdown("### Google Sheets Status")
         if not GSPREAD_AVAILABLE:
@@ -3051,4 +3274,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.72")
+st.caption("Smart Slip v2.8.73")
