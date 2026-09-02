@@ -405,9 +405,10 @@ if "grok_prediction" not in st.session_state:
 
 # Known tracks: name -> nearest METAR airport + elevation
 try:
-    from tracks_library import TRACK_LIBRARY, track_names, suggest_tracks, find_track, geocode_track, match_track_from_slip, TRACK_ICAO
+    from tracks_library import TRACK_LIBRARY, track_names, suggest_tracks, find_track, geocode_track, match_track_from_slip, TRACK_ICAO, TRACK_POINTS
 except Exception:
     TRACK_ICAO = {}
+    TRACK_POINTS = {}
     TRACK_LIBRARY = []
     def track_names():
         return []
@@ -678,13 +679,39 @@ def _weatherkit_cfg():
             }
         except Exception:
             cfg = {}
-    key = (cfg.get("private_key") or "").replace("\\n", "\n")
-    if key and "BEGIN" not in key:
-        key = "-----BEGIN PRIVATE KEY-----\n" + key + "\n-----END PRIVATE KEY-----"
-    cfg["private_key"] = key
+    cfg["private_key"] = str(cfg.get("private_key") or "")
     if not all([cfg.get("team_id"), cfg.get("key_id"), cfg.get("service_id"), cfg.get("private_key")]):
         return None
     return cfg
+
+
+def _wk_key_body(raw: str) -> str:
+    text = str(raw or "").replace("\\n", "\n").replace("\\r", "\n").replace("\r", "\n")
+    return "".join(ch for ch in text if ch.isalnum() or ch in "+/=")
+
+
+def _wk_load_private_key(raw: str):
+    """Load an Apple .p8 key even if Secrets smashed the PEM line breaks."""
+    from cryptography.hazmat.primitives.serialization import load_der_private_key, load_pem_private_key
+    body = _wk_key_body(raw)
+    if not body:
+        raise ValueError("private_key is empty after cleaning")
+    padded = body + ("=" * ((-len(body)) % 4))
+    der_err = None
+    try:
+        der = base64.b64decode(padded, validate=False)
+        return load_der_private_key(der, password=None)
+    except Exception as e:
+        der_err = e
+    wrapped = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    pem = f"-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----\n"
+    try:
+        return load_pem_private_key(pem.encode("utf-8"), password=None)
+    except Exception as pem_err:
+        raise ValueError(
+            f"Could not read WeatherKit private key (len={len(body)}). "
+            f"DER: {der_err}; PEM: {pem_err}"
+        )
 
 
 def weatherkit_ready():
@@ -705,6 +732,7 @@ def _weatherkit_token():
         return _WK_TOKEN["jwt"]
     try:
         import jwt
+        key_obj = _wk_load_private_key(cfg["private_key"])
         token = jwt.encode(
             {
                 "iss": cfg["team_id"],
@@ -712,7 +740,7 @@ def _weatherkit_token():
                 "exp": now + 3500,
                 "sub": cfg["service_id"],
             },
-            cfg["private_key"],
+            key_obj,
             algorithm="ES256",
             headers={
                 "kid": cfg["key_id"],
@@ -855,21 +883,83 @@ def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
         return None
 
 
-def resolve_track_point(rec, track_name=""):
+def _ok_coord(v):
+    return v not in [None, ""]
+
+
+def parse_browser_gps(raw):
+    if raw in [None, "", 0, "0", "null"]:
+        return None
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return None
+    if not isinstance(data, dict):
+        return None
+    if not _ok_coord(data.get("lat")) or not _ok_coord(data.get("lon")):
+        return None
+    elev = data.get("elev_ft")
+    try:
+        elev = float(elev) if elev not in [None, ""] else None
+    except Exception:
+        elev = None
+    return {"lat": float(data["lat"]), "lon": float(data["lon"]), "elev_ft": elev}
+
+
+def ensure_browser_gps():
+    """Ask the phone/browser for a location once per session (Manual / Auto Log)."""
+    cached = st.session_state.get("user_gps")
+    if cached and _ok_coord(cached.get("lat")):
+        return cached
+    if not JS_AVAILABLE:
+        return None
+    raw = st_javascript(
+        """
+        await new Promise((resolve) => {
+          if (!navigator.geolocation) { resolve(null); return; }
+          navigator.geolocation.getCurrentPosition(
+            (p) => resolve(JSON.stringify({
+              lat: p.coords.latitude,
+              lon: p.coords.longitude,
+              elev_ft: (p.coords.altitude == null) ? null : (p.coords.altitude * 3.28084)
+            })),
+            () => resolve(null),
+            {enableHighAccuracy: true, timeout: 8000, maximumAge: 120000}
+          );
+        });
+        """,
+        key="smartslip_gps",
+    )
+    gps = parse_browser_gps(raw)
+    if gps:
+        st.session_state.user_gps = gps
+    return gps
+
+
+def resolve_track_point(rec, track_name="", gps=None):
+    """Library tree pin first, then live GPS, then city geocode for known strips."""
     rec = dict(rec or {})
     lat, lon = rec.get("lat"), rec.get("lon")
-    if lat in [None, ""] or lon in [None, ""]:
-        city, region = rec.get("city"), rec.get("region")
-        if city:
-            try:
-                loc = geocode_track(city, region or "")
-                if loc and loc[0] is not None:
-                    lat, lon = loc
-                    rec["lat"], rec["lon"] = lat, lon
-            except Exception:
-                pass
+    source = "track_pin" if _ok_coord(lat) and _ok_coord(lon) else None
+    gps = gps or st.session_state.get("user_gps")
+    if source is None and gps and _ok_coord(gps.get("lat")) and _ok_coord(gps.get("lon")):
+        lat, lon = gps.get("lat"), gps.get("lon")
+        if rec.get("elev_ft") in [None, ""] and _ok_coord(gps.get("elev_ft")):
+            rec["elev_ft"] = gps.get("elev_ft")
+        source = "device_gps"
+    if source is None and rec.get("city") and rec.get("region"):
+        try:
+            loc = geocode_track(rec.get("city"), rec.get("region") or "")
+            if loc and loc[0] is not None:
+                lat, lon = loc
+                source = "city_geocode"
+        except Exception:
+            pass
     rec["lat"], rec["lon"] = lat, lon
     rec["elev_ft"] = rec.get("elev_ft") or 400
+    rec["location_source"] = source
     return rec
 
 def fetch_weather(icao, when=None, elev=400):
@@ -946,6 +1036,13 @@ def render_track_picker(prefix: str):
         key=f"{prefix}_track_select_{st.session_state[nkey]}",
     )
     pred_track = canonicalize_track(picked) or (picked or "").strip() or last_track
+    custom = st.text_input(
+        "Not in the library? Type the strip name",
+        key=f"{prefix}_track_custom",
+        placeholder="WeatherKit will use your phone GPS",
+    )
+    if str(custom or "").strip():
+        pred_track = str(custom).strip()
     if pred_track:
         saved = list(st.session_state.get("saved_tracks") or [])
         if pred_track not in saved:
@@ -1003,17 +1100,17 @@ def fetch_weather_noaa(lat, lon):
 # Set True to allow airport METAR / IEM when WeatherKit fails.
 USE_METAR_FALLBACK = False
 
-def fetch_weather_for_track(track_name, when=None):
+def fetch_weather_for_track(track_name, when=None, gps=None):
     rec = find_track(track_name)
     if not rec:
         rec = {
             "name": (track_name or "").strip() or "Unknown",
-            "city": (track_name or "").strip(),
+            "city": "",
             "region": "",
             "address": (track_name or "").strip(),
             "lat": None, "lon": None, "elev_ft": 400, "icao": None,
         }
-    rec = resolve_track_point(rec, track_name)
+    rec = resolve_track_point(rec, track_name, gps=gps)
     elev = rec.get("elev_ft") or 400
     wx = None
     if rec.get("lat") not in [None, ""] and rec.get("lon") not in [None, ""]:
@@ -1040,6 +1137,12 @@ def fetch_weather_for_track(track_name, when=None):
     wx["track"] = rec.get("name") or track_name
     wx["address"] = rec.get("address")
     wx["elev_ft"] = elev
+    wx["location_source"] = rec.get("location_source")
+    src = wx.get("weather_source") or "WeatherKit"
+    if rec.get("location_source") == "device_gps":
+        wx["weather_source"] = f"{src} [GPS]"
+    elif rec.get("location_source") == "track_pin":
+        wx["weather_source"] = f"{src} [tree pin]"
     if rec.get("lat") not in [None, ""]:
         wx["lat"] = rec.get("lat")
         wx["lon"] = rec.get("lon")
@@ -1359,7 +1462,7 @@ def fill_weather_for_run(run: dict) -> dict:
         return run
     track = run.get("track") or "Numidia Dragway"
     when = _parse_run_when(run.get("date"), run.get("time"))
-    wx = fetch_weather_for_track(track, when=when)
+    wx = fetch_weather_for_track(track, when=when, gps=st.session_state.get("user_gps"))
     if not wx:
         return run
     for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
@@ -1987,7 +2090,7 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
         }
         track = new_run.get("track")
         when = _parse_run_when(new_run.get("date"), new_run.get("time"))
-        wx = fetch_weather_for_track(track, when=when) if track and track != "Unknown" else None
+        wx = fetch_weather_for_track(track, when=when, gps=ctx.get("gps")) if track else None
         if wx and weather_looks_sane(wx):
             for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
                       "water_grains", "air_density_pct", "vapor_pressure"]:
@@ -2453,6 +2556,7 @@ user_profiles = st.session_state.get("car_profiles") or []
 # ====================== PHOTO IMPORT (NEW) ======================
 if st.session_state.nav == "Auto Log":
     st.subheader("Auto Log")
+    ensure_browser_gps()
     st.write("Take a clear photo of your timeslip. Smart Slip will extract the data automatically.")
 
     user_profiles = st.session_state.car_profiles
@@ -2558,6 +2662,7 @@ notes=
                 "profile_id": selected_profile_id,
                 "profile_name": profile_name,
                 "notes": notes,
+                "gps": st.session_state.get("user_gps"),
             }
             write_job(job_id, ctx["user"], "auto", "running")
             st.session_state.auto_job_id = job_id
@@ -2616,6 +2721,37 @@ if st.session_state.nav == "Manual Log":
         vehicle_name = "Main Car"
         st.warning("Create a Car Profile in Settings first.")
     track = render_track_picker("manual")
+    gps = ensure_browser_gps()
+    rec = find_track(track)
+    if rec and rec.get("lat") not in [None, ""]:
+        st.caption("WeatherKit will use the library pin at the tree.")
+    elif gps:
+        st.caption("Strip not pinned — WeatherKit will use this phone’s GPS.")
+    else:
+        st.caption("Allow location if this strip is not in the library so WeatherKit can use GPS.")
+    if st.button("Pull WeatherKit", key="manual_pull_wx"):
+        wx = fetch_weather_for_track(track, gps=gps)
+        if wx and weather_looks_sane(wx):
+            if wx.get("temp_f") not in [None, ""]:
+                st.session_state.manual_temp = float(wx["temp_f"])
+            if wx.get("altimeter_inhg") not in [None, ""]:
+                st.session_state.manual_altim = float(wx["altimeter_inhg"])
+            if wx.get("humidity_pct") not in [None, ""]:
+                st.session_state.manual_humidity = float(wx["humidity_pct"])
+            if wx.get("density_altitude") not in [None, ""]:
+                st.session_state.manual_da = float(wx["density_altitude"])
+            if wx.get("water_grains") not in [None, ""]:
+                st.session_state.manual_grains = float(wx["water_grains"])
+            if wx.get("air_density_pct") not in [None, ""]:
+                st.session_state.manual_air = float(wx["air_density_pct"])
+            if wx.get("vapor_pressure") not in [None, ""]:
+                st.session_state.manual_vapor = float(wx["vapor_pressure"])
+            st.session_state.manual_wx_note = wx.get("weather_source") or "WeatherKit"
+            st.rerun()
+        else:
+            st.session_state.manual_wx_note = "No weather — pick a library track or allow location."
+    if st.session_state.get("manual_wx_note"):
+        st.caption(st.session_state.manual_wx_note)
     st.markdown("**Weather**")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -3307,4 +3443,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.74")
+st.caption("Smart Slip v2.8.75")
