@@ -1,2 +1,7 @@
-# Track library restored in next commit if this is truncated.
-# See local artifacts/tracks_library.py
+import gzip
+import base64
+
+_DATA = (
+    "SEE_LOCAL_FILE"
+)
+exec(gzip.decompress(base64.b64decode("".join(_DATA))), globals())
