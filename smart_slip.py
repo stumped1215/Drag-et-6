@@ -2009,12 +2009,17 @@ def get_jobs_ws():
     except Exception:
         return None
 
-def write_job(job_id, user, kind, status, result="", error="", extra=""):
+def write_job(job_id, user, kind, status, result="", error="", extra="", sheet=True):
     JOB_MEM = PRED_PROMPTS
+    prev = JOB_MEM.get(job_id) or {}
     JOB_MEM[job_id] = {
         "id": job_id, "user": user, "kind": kind, "status": status,
         "result": result or "", "error": error or "", "extra": extra or "",
     }
+    if prev.get("run"):
+        JOB_MEM[job_id]["run"] = prev["run"]
+    if not sheet:
+        return
     ws = get_jobs_ws()
     if ws is None:
         return
@@ -2182,28 +2187,38 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
             "weather_pending": "yes",
         }
         track = new_run.get("track")
-        when = _parse_run_when(new_run.get("date"), new_run.get("time"))
-        wx = fetch_weather_for_track(track, when=when, gps=ctx.get("gps")) if track else None
-        if wx and weather_looks_sane(wx):
-            for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
-                      "water_grains", "air_density_pct", "vapor_pressure"]:
-                if wx.get(k) not in [None, ""]:
-                    new_run[k] = wx.get(k)
-            new_run["weather_pending"] = ""
-        save_run_to_sheet(new_run)
         et_s = ""
         try:
             if new_run.get("et") not in [None, ""]:
                 et_s = f"{float(new_run['et']):.3f}"
         except Exception:
             pass
+        extra = "|".join([p for p in [track or "", "wx_pending"] if p])
+        write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=extra, sheet=False)
+        PRED_PROMPTS.setdefault(job_id, {})["run"] = new_run
+        wx = None
+        try:
+            when = _parse_run_when(new_run.get("date"), new_run.get("time"))
+            wx = fetch_weather_for_track(track, when=when, gps=ctx.get("gps")) if track else None
+            if wx and weather_looks_sane(wx):
+                for k in ["temp_f", "altimeter_inhg", "humidity_pct", "density_altitude",
+                          "water_grains", "air_density_pct", "vapor_pressure"]:
+                    if wx.get(k) not in [None, ""]:
+                        new_run[k] = wx.get(k)
+                new_run["weather_pending"] = ""
+        except Exception:
+            wx = None
+        try:
+            save_run_to_sheet(new_run)
+        except Exception:
+            pass
         wx_flag = "wx_on" if (wx and weather_looks_sane(wx)) else "wx_miss"
         wx_line = format_wx_line(wx) if wx_flag == "wx_on" else ""
         extra = "|".join([p for p in [track or "", wx_flag, wx_line] if p is not None])
-        write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=extra)
+        write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=extra, sheet=False)
         PRED_PROMPTS.setdefault(job_id, {})["run"] = new_run
     except Exception as e:
-        write_job(job_id, ctx.get("user"), "auto", "error", error=str(e))
+        write_job(job_id, ctx.get("user"), "auto", "error", error=str(e), sheet=False)
 
 def _predict_worker(job_id, prompt, user, wx_bits):
     try:
@@ -2430,7 +2445,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.84 • Auto Log • Weather • Predict</p>
+    <p>v2.8.85 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2759,64 +2774,83 @@ notes=
                 "notes": notes,
                 "gps": st.session_state.get("user_gps"),
             }
-            write_job(job_id, ctx["user"], "auto", "running")
-            st.session_state.auto_job_id = job_id
-            threading.Thread(target=_auto_worker, args=(job_id, prompt, img_bytes, ctx), daemon=True).start()
-            st.rerun()
+            img_fp = hashlib.md5(img_bytes).hexdigest()
+            last_fp = st.session_state.get("auto_last_img")
+            last_ts = float(st.session_state.get("auto_last_ts") or 0)
+            if last_fp == img_fp and (time.time() - last_ts) < 60:
+                st.session_state.auto_busy = False
+                st.warning("That slip is already in the Log Book. Change the photo to log another.")
+            else:
+                write_job(job_id, ctx["user"], "auto", "running", sheet=False)
+                st.session_state.auto_job_id = job_id
+                st.session_state.auto_last_img = img_fp
+                st.session_state.auto_last_ts = time.time()
+                threading.Thread(target=_auto_worker, args=(job_id, prompt, img_bytes, ctx), daemon=True).start()
+                st.rerun()
 
     auto_job = read_job(st.session_state.get("auto_job_id"))
-    if not auto_job:
-        auto_job = latest_user_job(
-            st.session_state.get("user_email") or st.session_state.get("user_name"),
-            "auto",
-        )
     if auto_job:
         stt = str(auto_job.get("status") or "")
         if stt == "running":
             wait_banner("Reading slip…")
-            time.sleep(2)
+            time.sleep(0.4)
             st.rerun()
         elif stt == "done":
             st.session_state.auto_busy = False
-            if st.session_state.get("auto_reloaded") != str(auto_job.get("id")):
-                saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
-                if saved:
-                    runs = list(st.session_state.get("runs") or [])
-                    if not any(str(x.get("id")) == str(saved.get("id")) for x in runs):
-                        runs.insert(0, saved)
-                        st.session_state.runs = runs
+            saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
+            if saved:
+                runs = list(st.session_state.get("runs") or [])
+                found = False
+                for i, x in enumerate(runs):
+                    if str(x.get("id")) == str(saved.get("id")):
+                        runs[i] = saved
+                        found = True
+                        break
+                if not found:
+                    runs.insert(0, saved)
+                st.session_state.runs = runs
                 st.session_state.auto_reloaded = str(auto_job.get("id"))
             et_s = auto_job.get("result") or ""
             extra = auto_job.get("extra") or ""
             extra_parts = [p for p in str(extra).split("|") if p != ""]
-            track_line = extra_parts[0] if extra_parts and extra_parts[0] not in ("wx_on", "wx_miss") else ""
+            flags = ("wx_on", "wx_miss", "wx_pending")
+            track_line = extra_parts[0] if extra_parts and extra_parts[0] not in flags else ""
             wx_flag = ""
             wx_line = ""
             for p in extra_parts[1:] if track_line else extra_parts:
-                if p in ("wx_on", "wx_miss") and not wx_flag:
+                if p in flags and not wx_flag:
                     wx_flag = p
-                elif p not in ("wx_on", "wx_miss"):
+                elif p not in flags:
                     wx_line = p
             saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
             if saved and not wx_flag:
                 if saved.get("temp_f") not in [None, ""] and saved.get("altimeter_inhg") not in [None, ""]:
                     wx_flag = "wx_on"
                     wx_line = wx_line or format_wx_line(saved)
+                elif str(saved.get("weather_pending") or "") == "yes":
+                    wx_flag = "wx_pending"
                 else:
                     wx_flag = "wx_miss"
             et_line = f"ET {et_s}s" if et_s and et_s not in ["saved", "SAVED"] else "Slip read"
             if wx_flag == "wx_on":
-                wx_status = "Weather on" + (f" · {wx_line}" if wx_line else "")
+                wx_status = "In Log Book · " + (wx_line or "Weather on")
+            elif wx_flag == "wx_pending":
+                wx_status = "In Log Book · weather catching up"
             elif wx_flag == "wx_miss":
-                wx_status = "Weather missed — open Manual Log to pull"
+                wx_status = "In Log Book · weather missed — pull it in Manual Log"
             else:
-                wx_status = "Entered in Log Book"
+                wx_status = "In Log Book"
             st.markdown(
                 f"<div class='ss-ok'>READING COMPLETE<br><span>{et_line}"
                 f"{(' @ ' + track_line) if track_line else ''}</span>"
                 f"<span>{wx_status}</span></div>",
                 unsafe_allow_html=True,
             )
+            if wx_flag == "wx_pending":
+                waited = time.time() - float(st.session_state.get("auto_last_ts") or time.time())
+                if waited < 20:
+                    time.sleep(0.5)
+                    st.rerun()
         elif stt == "error":
             st.session_state.auto_busy = False
             st.markdown("<div class='ss-bad'>Could not read the slip</div>", unsafe_allow_html=True)
@@ -3591,4 +3625,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.84")
+st.caption("Smart Slip v2.8.85")
