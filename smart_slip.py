@@ -1117,24 +1117,8 @@ def render_track_picker(prefix: str):
             break
     rest = sorted(n for n in library if n not in recent)
     options = recent + rest
-    q = st.text_input(
-        "Filter tracks",
-        key=f"{prefix}_track_filter",
-        placeholder="Type part of the strip or city",
-    )
-    if str(q or "").strip():
-        needle = str(q).strip().lower()
-        options = [
-            n for n in options
-            if needle in n.lower() or needle in labels.get(n, "").lower()
-        ]
-    if not options:
-        st.caption("No tracks match that filter.")
-        options = [last_track] if last_track in labels else (library[:1] or ["Numidia Dragway"])
-        if options[0] not in labels:
-            labels[options[0]] = options[0]
-    if last_track not in options:
-        last_track = options[0]
+    if last_track not in options and last_track:
+        last_track = options[0] if options else "Numidia Dragway"
     idx = options.index(last_track) if last_track in options else 0
     picked = st.selectbox(
         "Drag Strip",
@@ -2447,7 +2431,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.82 • Auto Log • Weather • Predict</p>
+    <p>v2.8.83 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3323,13 +3307,19 @@ if st.session_state.nav == "Log Book":
                     tlab = time_only(r0)
                     s60 = fmt(r0.get("sixty_ft"), 3)
                     s330 = fmt(r0.get("three_thirty_ft"), 3)
+                    da_txt = "—"
+                    try:
+                        if r0.get("density_altitude") not in [None, ""]:
+                            da_txt = f"{int(float(r0.get('density_altitude')))}"
+                    except Exception:
+                        da_txt = fmt(r0.get("density_altitude"), 0)
                     opened = rid in [str(x) for x in (st.session_state.get("log_open") or [])]
                     if finish_l == "1/4":
                         e8 = eighth if eighth != "—" else fmt(r0.get("eighth_et"), 3)
                         k1 = fmt(r0.get("thousand_et"), 3)
-                        cells = [("60'", s60), ("1/8", e8), ("1000'", k1), ("1/4", finish_v)]
+                        cells = [("60'", s60), ("1/8", e8), ("1000'", k1), ("1/4", finish_v), ("DA", da_txt)]
                     else:
-                        cells = [("60'", s60), ("330'", s330), ("1/8", finish_v)]
+                        cells = [("60'", s60), ("330'", s330), ("1/8", finish_v), ("DA", da_txt)]
                     grid = "".join(
                         f"<div><span>{lab}</span><b>{val}</b></div>" for lab, val in cells
                     )
@@ -3363,6 +3353,7 @@ if st.session_state.nav == "Log Book":
                         if extra:
                             st.caption(" · ".join(extra))
                         st.write(
+                            f"DA {fmt(r.get('density_altitude'), 0)} ft · "
                             f"Temp {fmt(r.get('temp_f'), 1)}°F · "
                             f"Hum {fmt(r.get('humidity_pct'), 0)}% · "
                             f"Baro {fmt(r.get('altimeter_inhg'), 2)} · "
@@ -3601,4 +3592,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.82")
+st.caption("Smart Slip v2.8.83")
