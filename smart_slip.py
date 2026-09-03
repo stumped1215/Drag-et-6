@@ -1740,7 +1740,19 @@ def load_data_from_sheet():
                 if key in owned_days and (not ru or ru in owned_names or _row_belongs_to_user(r, owned_pids, owned_names)):
                     kept.append(r)
             runs = kept
-        st.session_state.car_profiles = profiles
+        seen_prof = set()
+        uniq = []
+        for p in profiles:
+            pk = (
+                str(p.get("id") or "").strip(),
+                str(p.get("user") or "").strip().lower(),
+                str(p.get("name") or "").strip().lower(),
+            )
+            if pk in seen_prof:
+                continue
+            seen_prof.add(pk)
+            uniq.append(p)
+        st.session_state.car_profiles = uniq
         st.session_state.runs = runs
         st.session_state.data_loaded = True
         return True
@@ -2435,7 +2447,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.81 • Auto Log • Weather • Predict</p>
+    <p>v2.8.82 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3465,21 +3477,22 @@ if st.session_state.nav == "Settings":
 
     if st.session_state.car_profiles:
         st.markdown("### Your Profiles")
-        for p in st.session_state.car_profiles:
+        for i, p in enumerate(st.session_state.car_profiles):
             with st.expander(f"{p.get('name')} ({p.get('car_type')})"):
-                pid = str(p.get("id"))
-                e_num = st.text_input("Car Number", value=str(p.get("car_number") or ""), key=f"edit_num_{pid}")
+                pid = str(p.get("id") or "")
+                uk = f"{i}_{pid or 'noid'}"
+                e_num = st.text_input("Car Number", value=str(p.get("car_number") or ""), key=f"edit_num_{uk}")
                 types = ["Dragster", "Door Car"]
-                e_type = st.selectbox("Car Type", types, index=types.index(p.get("car_type")) if p.get("car_type") in types else 0, key=f"edit_type_{pid}")
+                e_type = st.selectbox("Car Type", types, index=types.index(p.get("car_type")) if p.get("car_type") in types else 0, key=f"edit_type_{uk}")
                 fuels = ["Gas", "E85", "Alcohol"]
-                e_fuel = st.selectbox("Fuel Type", fuels, index=fuels.index(p.get("fuel_type")) if p.get("fuel_type") in fuels else 2, key=f"edit_fuel_{pid}")
-                e_weight = st.number_input("Weight (lbs)", value=float(p.get("weight") or 0), step=50.0, key=f"edit_wt_{pid}")
-                e_tire = st.text_input("Tire Size", value=str(p.get("tire_size") or ""), key=f"edit_tire_{pid}")
+                e_fuel = st.selectbox("Fuel Type", fuels, index=fuels.index(p.get("fuel_type")) if p.get("fuel_type") in fuels else 2, key=f"edit_fuel_{uk}")
+                e_weight = st.number_input("Weight (lbs)", value=float(p.get("weight") or 0), step=50.0, key=f"edit_wt_{uk}")
+                e_tire = st.text_input("Tire Size", value=str(p.get("tire_size") or ""), key=f"edit_tire_{uk}")
                 ttypes = ["Radial", "Bias"]
-                e_ttype = st.selectbox("Tire Type", ttypes, index=ttypes.index(p.get("tire_type")) if p.get("tire_type") in ttypes else 1, key=f"edit_ttype_{pid}")
-                e_first = st.number_input("1st Gear Ratio", value=float(p.get("trans_first_gear") or 1.8), step=0.05, format="%.2f", key=f"edit_first_{pid}")
-                e_rear = st.number_input("Rear Gear Ratio", value=float(p.get("rear_gear") or 4.1), step=0.05, format="%.2f", key=f"edit_rear_{pid}")
-                if st.button("Save profile", key=f"save_prof_{pid}"):
+                e_ttype = st.selectbox("Tire Type", ttypes, index=ttypes.index(p.get("tire_type")) if p.get("tire_type") in ttypes else 1, key=f"edit_ttype_{uk}")
+                e_first = st.number_input("1st Gear Ratio", value=float(p.get("trans_first_gear") or 1.8), step=0.05, format="%.2f", key=f"edit_first_{uk}")
+                e_rear = st.number_input("Rear Gear Ratio", value=float(p.get("rear_gear") or 4.1), step=0.05, format="%.2f", key=f"edit_rear_{uk}")
+                if st.button("Save profile", key=f"save_prof_{uk}"):
                     p.update({
                         "car_number": e_num.strip(),
                         "car_type": e_type,
@@ -3495,9 +3508,9 @@ if st.session_state.nav == "Settings":
                     st.rerun()
                 warn = st.checkbox(
                     f"I understand deleting {p.get('name')} will erase all stored runs for this profile",
-                    key=f"del_ok_{pid}"
+                    key=f"del_ok_{uk}"
                 )
-                if st.button("Delete this profile", key=f"del_{pid}"):
+                if st.button("Delete this profile", key=f"del_{uk}"):
                     if not warn:
                         st.error("Check the box to confirm you will lose all stored data for this profile.")
                     else:
@@ -3588,4 +3601,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.81")
+st.caption("Smart Slip v2.8.82")
