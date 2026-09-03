@@ -688,33 +688,55 @@ def _weatherkit_cfg():
     return cfg
 
 
+def _wk_normalize_key_text(raw: str) -> str:
+    text = str(raw or "")
+    text = text.replace("\\n", "\n").replace("\\r", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("-----BEGIN PRIVATE KEY-----", "\n-----BEGIN PRIVATE KEY-----\n")
+    text = text.replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----\n")
+    text = text.replace("-----BEGIN EC PRIVATE KEY-----", "\n-----BEGIN EC PRIVATE KEY-----\n")
+    text = text.replace("-----END EC PRIVATE KEY-----", "\n-----END EC PRIVATE KEY-----\n")
+    return text
+
+
 def _wk_key_body(raw: str) -> str:
-    text = str(raw or "").replace("\\n", "\n").replace("\\r", "\n").replace("\r", "\n")
+    """Base64 body only — drop PEM labels so BEGIN/END letters are not decoded as key bytes."""
+    text = _wk_normalize_key_text(raw)
+    text = re.sub(r"-----BEGIN [A-Z0-9 ]+-----", "", text, flags=re.I)
+    text = re.sub(r"-----END [A-Z0-9 ]+-----", "", text, flags=re.I)
+    text = text.replace("-", "+").replace("_", "/")
     return "".join(ch for ch in text if ch.isalnum() or ch in "+/=")
 
 
 def _wk_load_private_key(raw: str):
     """Load an Apple .p8 key even if Secrets smashed the PEM line breaks."""
     from cryptography.hazmat.primitives.serialization import load_der_private_key, load_pem_private_key
+    errors = []
+    text = _wk_normalize_key_text(raw).strip()
+    if "BEGIN" in text.upper() and "PRIVATE KEY" in text.upper():
+        try:
+            return load_pem_private_key(text.encode("utf-8"), password=None)
+        except Exception as e:
+            errors.append(f"raw PEM: {e}")
     body = _wk_key_body(raw)
     if not body:
         raise ValueError("private_key is empty after cleaning")
     padded = body + ("=" * ((-len(body)) % 4))
-    der_err = None
     try:
         der = base64.b64decode(padded, validate=False)
         return load_der_private_key(der, password=None)
     except Exception as e:
-        der_err = e
+        errors.append(f"DER: {e}")
     wrapped = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
-    pem = f"-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----\n"
-    try:
-        return load_pem_private_key(pem.encode("utf-8"), password=None)
-    except Exception as pem_err:
-        raise ValueError(
-            f"Could not read WeatherKit private key (len={len(body)}). "
-            f"DER: {der_err}; PEM: {pem_err}"
-        )
+    for label in ("PRIVATE KEY", "EC PRIVATE KEY"):
+        pem = f"-----BEGIN {label}-----\n{wrapped}\n-----END {label}-----\n"
+        try:
+            return load_pem_private_key(pem.encode("utf-8"), password=None)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+    raise ValueError(
+        f"Could not read WeatherKit private key (body_len={len(body)}). "
+        + " | ".join(errors[:3])
+    )
 
 
 def weatherkit_ready():
@@ -2327,7 +2349,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.77 • Auto Log • Weather • Predict</p>
+    <p>v2.8.78 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3437,4 +3459,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.77")
+st.caption("Smart Slip v2.8.78")
