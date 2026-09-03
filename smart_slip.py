@@ -552,6 +552,9 @@ def pressure_to_inhg(val):
         v = float(val)
     except Exception:
         return None
+    # WeatherKit/NWS sometimes send Pa instead of millibars.
+    if v > 5000:
+        v = v / 100.0
     if v > 50:
         v = v / 33.8639
     if v < 24 or v > 32.5:
@@ -795,6 +798,8 @@ def _wx_from_weatherkit(block, elev=400, source="WeatherKit"):
             hum = hum * 100.0
         hum = round(hum)
     pres = block.get("pressure")
+    if pres is None:
+        pres = block.get("pressureValue") or block.get("seaLevelPressure")
     altim = pressure_to_inhg(pres) if pres is not None else None
     wx = {
         "temp_f": temp_f,
@@ -876,7 +881,11 @@ def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
             if not when:
                 _WK_CACHE[cache_key] = (time.time(), dict(wx))
             return wx
-        _WK_LAST["error"] = "WeatherKit returned data that failed the sanity check."
+        cur = data.get("currentWeather") or {}
+        _WK_LAST["error"] = (
+            "WeatherKit returned data that failed the sanity check "
+            f"(temp={cur.get('temperature')} pressure={cur.get('pressure')})."
+        )
         return None
     except Exception as e:
         _WK_LAST["error"] = f"WeatherKit request failed: {e}"
@@ -909,33 +918,12 @@ def parse_browser_gps(raw):
 
 
 def ensure_browser_gps():
-    """Ask the phone/browser for a location once per session (Manual / Auto Log)."""
+    """Return a GPS fix only if we already have one. Do not call JS on every page load —
+    streamlit-javascript shares one slot with sign-in and a geolocation prompt blocks WeatherKit."""
     cached = st.session_state.get("user_gps")
     if cached and _ok_coord(cached.get("lat")):
         return cached
-    if not JS_AVAILABLE:
-        return None
-    raw = st_javascript(
-        """
-        await new Promise((resolve) => {
-          if (!navigator.geolocation) { resolve(null); return; }
-          navigator.geolocation.getCurrentPosition(
-            (p) => resolve(JSON.stringify({
-              lat: p.coords.latitude,
-              lon: p.coords.longitude,
-              elev_ft: (p.coords.altitude == null) ? null : (p.coords.altitude * 3.28084)
-            })),
-            () => resolve(null),
-            {enableHighAccuracy: true, timeout: 8000, maximumAge: 120000}
-          );
-        });
-        """,
-        key="smartslip_gps",
-    )
-    gps = parse_browser_gps(raw)
-    if gps:
-        st.session_state.user_gps = gps
-    return gps
+    return None
 
 
 def resolve_track_point(rec, track_name="", gps=None):
@@ -1039,7 +1027,7 @@ def render_track_picker(prefix: str):
     custom = st.text_input(
         "Not in the library? Type the strip name",
         key=f"{prefix}_track_custom",
-        placeholder="WeatherKit will use your phone GPS",
+        placeholder="Use a library name so WeatherKit has a pin",
     )
     if str(custom or "").strip():
         pred_track = str(custom).strip()
@@ -1113,10 +1101,15 @@ def fetch_weather_for_track(track_name, when=None, gps=None):
     rec = resolve_track_point(rec, track_name, gps=gps)
     elev = rec.get("elev_ft") or 400
     wx = None
-    if rec.get("lat") not in [None, ""] and rec.get("lon") not in [None, ""]:
-        wx = fetch_weather_weatherkit(
-            rec.get("lat"), rec.get("lon"), when=when, elev=elev, region=rec.get("region")
+    if rec.get("lat") in [None, ""] or rec.get("lon") in [None, ""]:
+        _WK_LAST["error"] = (
+            f"No pin for {rec.get('name') or track_name or 'this strip'}. "
+            "Pick a library track so WeatherKit has coordinates."
         )
+        return None
+    wx = fetch_weather_weatherkit(
+        rec.get("lat"), rec.get("lon"), when=when, elev=elev, region=rec.get("region")
+    )
     icao = rec.get("icao")
     if not icao and rec.get("name"):
         icao = TRACK_ICAO.get(str(rec.get("name") or "").lower())
@@ -2334,7 +2327,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.74 • Auto Log • Weather • Predict</p>
+    <p>v2.8.77 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2556,7 +2549,6 @@ user_profiles = st.session_state.get("car_profiles") or []
 # ====================== PHOTO IMPORT (NEW) ======================
 if st.session_state.nav == "Auto Log":
     st.subheader("Auto Log")
-    ensure_browser_gps()
     st.write("Take a clear photo of your timeslip. Smart Slip will extract the data automatically.")
 
     user_profiles = st.session_state.car_profiles
@@ -2721,16 +2713,13 @@ if st.session_state.nav == "Manual Log":
         vehicle_name = "Main Car"
         st.warning("Create a Car Profile in Settings first.")
     track = render_track_picker("manual")
-    gps = ensure_browser_gps()
     rec = find_track(track)
     if rec and rec.get("lat") not in [None, ""]:
         st.caption("WeatherKit will use the library pin at the tree.")
-    elif gps:
-        st.caption("Strip not pinned — WeatherKit will use this phone’s GPS.")
     else:
-        st.caption("Allow location if this strip is not in the library so WeatherKit can use GPS.")
+        st.caption("Pick a library strip. Unknown names need a pin before WeatherKit can run.")
     if st.button("Pull WeatherKit", key="manual_pull_wx"):
-        wx = fetch_weather_for_track(track, gps=gps)
+        wx = fetch_weather_for_track(track)
         if wx and weather_looks_sane(wx):
             if wx.get("temp_f") not in [None, ""]:
                 st.session_state.manual_temp = float(wx["temp_f"])
@@ -2749,9 +2738,14 @@ if st.session_state.nav == "Manual Log":
             st.session_state.manual_wx_note = wx.get("weather_source") or "WeatherKit"
             st.rerun()
         else:
-            st.session_state.manual_wx_note = "No weather — pick a library track or allow location."
-    if st.session_state.get("manual_wx_note"):
-        st.caption(st.session_state.manual_wx_note)
+            err = weatherkit_last_error() or "WeatherKit returned nothing for this pin."
+            st.session_state.manual_wx_note = err
+    note = st.session_state.get("manual_wx_note") or ""
+    if note:
+        if note.lower().startswith("weatherkit") and "°" not in note and "tree pin" not in note.lower() and "[gps]" not in note.lower():
+            st.error(note)
+        else:
+            st.caption(note)
     st.markdown("**Weather**")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -3443,4 +3437,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.75")
+st.caption("Smart Slip v2.8.77")
