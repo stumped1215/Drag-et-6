@@ -351,7 +351,12 @@ WORKSHEET_USERS = "Users"
 WORKSHEET_BUGS = "Bugs"
 WORKSHEET_PREDICT = "PredictJobs"
 WORKSHEET_TIMINGS = "Timings"
-PRED_PROMPTS = {}
+@st.cache_resource
+def _job_store():
+    """Survive Streamlit reruns. A plain module dict is wiped every page run."""
+    return {}
+
+PRED_PROMPTS = _job_store()
 AUTH_COOKIE = "smartslip_auth"
 AUTH_DAYS = 30
 
@@ -2010,7 +2015,7 @@ def get_jobs_ws():
         return None
 
 def write_job(job_id, user, kind, status, result="", error="", extra="", sheet=True):
-    JOB_MEM = PRED_PROMPTS
+    JOB_MEM = _job_store()
     prev = JOB_MEM.get(job_id) or {}
     JOB_MEM[job_id] = {
         "id": job_id, "user": user, "kind": kind, "status": status,
@@ -2045,16 +2050,13 @@ def write_job(job_id, user, kind, status, result="", error="", extra="", sheet=T
 def read_job(job_id):
     if not job_id:
         return None
-    mem = PRED_PROMPTS.get(job_id)
+    mem = _job_store().get(job_id) or PRED_PROMPTS.get(job_id)
     if mem:
         return mem
     try:
-        ws = get_jobs_ws()
-        if ws is None:
-            return None
-        for rec in ws.get_all_records():
-            if str(rec.get("id")) == str(job_id):
-                return rec
+        snap = st.session_state.get("auto_job_snap") or {}
+        if str(snap.get("id") or "") == str(job_id):
+            return snap
     except Exception:
         pass
     return None
@@ -2445,7 +2447,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.85 • Auto Log • Weather • Predict</p>
+    <p>v2.8.86 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2667,7 +2669,18 @@ user_profiles = st.session_state.get("car_profiles") or []
 # ====================== PHOTO IMPORT (NEW) ======================
 if st.session_state.nav == "Auto Log":
     st.subheader("Auto Log")
-    st.write("Take a clear photo of your timeslip. Smart Slip will extract the data automatically.")
+    auto_job_now = read_job(st.session_state.get("auto_job_id"))
+    auto_running = bool(st.session_state.get("auto_busy"))
+    if auto_job_now and str(auto_job_now.get("status")) == "running":
+        auto_running = True
+        st.session_state.auto_busy = True
+    started = float(st.session_state.get("auto_last_ts") or 0)
+    if auto_running and started and (time.time() - started) > 90:
+        st.session_state.auto_busy = False
+        auto_running = False
+        st.error("Reading timed out. Tap Extract again.")
+    if auto_running:
+        wait_banner("Reading slip…")
 
     user_profiles = st.session_state.car_profiles
     if user_profiles:
@@ -2692,11 +2705,6 @@ if st.session_state.nav == "Auto Log":
 
     notes = st.text_area("Additional Notes (spin / lift / brakes / deep stage / womp)", height=70, key="photo_notes")
 
-    auto_running = bool(st.session_state.get("auto_busy"))
-    cur_auto = read_job(st.session_state.get("auto_job_id"))
-    if cur_auto and str(cur_auto.get("status")) == "running":
-        auto_running = True
-        st.session_state.auto_busy = True
     if auto_running:
         st.warning("Reading this slip now. Do not tap Extract again.")
     extract = st.button(
@@ -2774,30 +2782,25 @@ notes=
                 "notes": notes,
                 "gps": st.session_state.get("user_gps"),
             }
-            img_fp = hashlib.md5(img_bytes).hexdigest()
-            last_fp = st.session_state.get("auto_last_img")
-            last_ts = float(st.session_state.get("auto_last_ts") or 0)
-            if last_fp == img_fp and (time.time() - last_ts) < 60:
-                st.session_state.auto_busy = False
-                st.warning("That slip is already in the Log Book. Change the photo to log another.")
-            else:
-                write_job(job_id, ctx["user"], "auto", "running", sheet=False)
-                st.session_state.auto_job_id = job_id
-                st.session_state.auto_last_img = img_fp
-                st.session_state.auto_last_ts = time.time()
-                threading.Thread(target=_auto_worker, args=(job_id, prompt, img_bytes, ctx), daemon=True).start()
-                st.rerun()
+            write_job(job_id, ctx["user"], "auto", "running", sheet=False)
+            st.session_state.auto_job_id = job_id
+            st.session_state.auto_last_ts = time.time()
+            st.session_state.auto_job_snap = {
+                "id": job_id, "user": ctx["user"], "kind": "auto",
+                "status": "running", "result": "", "error": "", "extra": "",
+            }
+            threading.Thread(target=_auto_worker, args=(job_id, prompt, img_bytes, ctx), daemon=True).start()
+            st.rerun()
 
-    auto_job = read_job(st.session_state.get("auto_job_id"))
+    auto_job = read_job(st.session_state.get("auto_job_id")) or st.session_state.get("auto_job_snap")
+    if auto_running and (not auto_job or str(auto_job.get("status") or "") == "running"):
+        time.sleep(0.4)
+        st.rerun()
     if auto_job:
         stt = str(auto_job.get("status") or "")
-        if stt == "running":
-            wait_banner("Reading slip…")
-            time.sleep(0.4)
-            st.rerun()
-        elif stt == "done":
+        if stt == "done":
             st.session_state.auto_busy = False
-            saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
+            saved = (_job_store().get(str(auto_job.get("id"))) or {}).get("run")
             if saved:
                 runs = list(st.session_state.get("runs") or [])
                 found = False
@@ -2822,7 +2825,7 @@ notes=
                     wx_flag = p
                 elif p not in flags:
                     wx_line = p
-            saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
+            saved = (_job_store().get(str(auto_job.get("id"))) or {}).get("run")
             if saved and not wx_flag:
                 if saved.get("temp_f") not in [None, ""] and saved.get("altimeter_inhg") not in [None, ""]:
                     wx_flag = "wx_on"
@@ -3625,4 +3628,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.85")
+st.caption("Smart Slip v2.8.86")
