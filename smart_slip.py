@@ -11,8 +11,12 @@ import hmac
 import secrets as pysecrets
 import smtplib
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 import threading
 import time
 import io
@@ -802,13 +806,58 @@ def _wk_tz(region=""):
     return "America/New_York"
 
 
+def _wk_zone(region=""):
+    name = _wk_tz(region)
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return timezone(timedelta(hours=-4))
+
+
 def _wk_hour_dt(s):
+    """Parse WeatherKit timestamps to naive UTC."""
     if not s:
         return None
     try:
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     except Exception:
         return None
+
+
+def _naive_utc_from_local(when, region=""):
+    """Treat a naive run clock as track-local time and convert to naive UTC.
+
+    Slip times and the Manual Log date/time pickers are local to the strip,
+    not Zulu. Sending them to WeatherKit with a raw Z suffix pulled the
+    wrong hour (9:25 AM Eastern became 09:25 UTC = 5:25 AM at the track).
+    """
+    if when is None:
+        return None
+    if getattr(when, "tzinfo", None) is not None:
+        return when.astimezone(timezone.utc).replace(tzinfo=None)
+    z = _wk_zone(region)
+    try:
+        return when.replace(tzinfo=z).astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return when
+
+
+def _fmt_track_local(odt_utc_naive, region=""):
+    """Show observation time in the strip's local zone, not 13:25Z."""
+    if not odt_utc_naive:
+        return ""
+    try:
+        local = odt_utc_naive.replace(tzinfo=timezone.utc).astimezone(_wk_zone(region))
+        hour = local.strftime("%I").lstrip("0") or "12"
+        tz = local.tzname() or ""
+        return f"{hour}:{local.strftime('%M %p')} {tz}".strip()
+    except Exception:
+        return odt_utc_naive.strftime("%H:%M") + "Z"
 
 
 def _wx_from_weatherkit(block, elev=400, source="WeatherKit"):
@@ -849,25 +898,18 @@ def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
         lat_f, lon_f = float(lat), float(lon)
     except Exception:
         return None
-    cache_key = f"{round(lat_f, 3)},{round(lon_f, 3)}"
-    if not when and cache_key in _WK_CACHE:
-        ts, cached = _WK_CACHE[cache_key]
-        if time.time() - ts < 900:
-            wx = dict(cached)
-            extra = calculate_weather(wx.get("temp_f"), wx.get("altimeter_inhg"), wx.get("humidity_pct") or 50, elev)
-            wx.update(extra)
-            return wx if weather_looks_sane(wx) else None
     try:
         params = {
             "dataSets": "currentWeather,forecastHourly",
             "timezone": _wk_tz(region),
         }
-        if when:
-            start = when - timedelta(hours=3)
-            end = when + timedelta(hours=2)
+        when_utc = _naive_utc_from_local(when, region) if when else None
+        if when_utc:
+            start = when_utc - timedelta(hours=3)
+            end = when_utc + timedelta(hours=2)
             params["hourlyStart"] = start.strftime("%Y-%m-%dT%H:%M:%SZ")
             params["hourlyEnd"] = end.strftime("%Y-%m-%dT%H:%M:%SZ")
-            params["currentAsOf"] = when.strftime("%Y-%m-%dT%H:%M:%SZ")
+            params["currentAsOf"] = when_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
         url = f"https://weatherkit.apple.com/api/v1/weather/en/{lat_f:.4f}/{lon_f:.4f}"
         r = requests.get(
             url,
@@ -881,32 +923,35 @@ def fetch_weather_weatherkit(lat, lon, when=None, elev=400, region=""):
             _WK_LAST["error"] = f"WeatherKit HTTP {r.status_code}: {body}"
             return None
         data = r.json() or {}
+        cur = data.get("currentWeather") or {}
+        asof = _wk_hour_dt(cur.get("asOf"))
+        hours = ((data.get("forecastHourly") or {}).get("hours")) or []
+        best, best_diff, best_odt = None, None, None
+        target = when_utc or datetime.utcnow()
+        for hr in hours:
+            odt = _wk_hour_dt(hr.get("forecastStart"))
+            if not odt:
+                continue
+            diff = abs((odt - target).total_seconds())
+            if best_diff is None or diff < best_diff:
+                best, best_diff, best_odt = hr, diff, odt
+        # Live current conditions beat the nearest clock-hour whenever they
+        # are at least as close to the requested time.
+        cur_diff = abs((asof - target).total_seconds()) if asof else None
+        use_current = bool(cur)
+        if when_utc and best is not None and cur_diff is not None:
+            use_current = cur_diff <= best_diff
+        elif when_utc and best is not None and cur_diff is None:
+            use_current = False
         wx = None
-        if when:
-            hours = ((data.get("forecastHourly") or {}).get("hours")) or []
-            best, best_diff = None, None
-            for hr in hours:
-                odt = _wk_hour_dt(hr.get("forecastStart"))
-                if not odt:
-                    continue
-                diff = abs((odt - when).total_seconds())
-                if best_diff is None or diff < best_diff:
-                    best, best_diff = hr, diff
-            if best:
-                stamp = ""
-                odt = _wk_hour_dt(best.get("forecastStart"))
-                if odt:
-                    stamp = f" @ {odt.strftime('%H:%M')}Z"
-                wx = _wx_from_weatherkit(best, elev, f"WeatherKit{stamp}")
-        if not wx:
-            cur = data.get("currentWeather") or {}
-            asof = _wk_hour_dt(cur.get("asOf"))
-            stamp = f" @ {asof.strftime('%H:%M')}Z" if asof else ""
+        if use_current:
+            stamp = f" @ {_fmt_track_local(asof, region)}" if asof else ""
             wx = _wx_from_weatherkit(cur, elev, f"WeatherKit{stamp}")
+        if not wx and best is not None:
+            stamp = f" @ {_fmt_track_local(best_odt, region)}" if best_odt else ""
+            wx = _wx_from_weatherkit(best, elev, f"WeatherKit{stamp}")
         if weather_looks_sane(wx or {}):
             _WK_LAST["error"] = ""
-            if not when:
-                _WK_CACHE[cache_key] = (time.time(), dict(wx))
             return wx
         cur = data.get("currentWeather") or {}
         _WK_LAST["error"] = (
@@ -1209,7 +1254,8 @@ def fetch_weather_for_track(track_name, when=None, gps=None):
     if USE_METAR_FALLBACK and (not wx) and icao:
         old = False
         try:
-            old = when and (datetime.utcnow() - when).total_seconds() > 72 * 3600
+            when_utc = _naive_utc_from_local(when, rec.get("region")) if when else None
+            old = when_utc and (datetime.utcnow() - when_utc).total_seconds() > 72 * 3600
         except Exception:
             old = bool(when)
         metar = None if old else fetch_weather(icao, when=when, elev=elev)
@@ -1331,15 +1377,27 @@ def metar_age_line(wx_bits, wx=None):
         src = str(wx.get("weather_source") or "")
     if not src and wx_bits:
         src = str(wx_bits)
-    m = re.search(r"@\s*(\d{1,2}):(\d{2})\s*Z", src)
+    m = re.search(r"@\s*(\d{1,2}):(\d{2})\s*(AM|PM)?\s*([A-Z]{2,4})?", src, re.I)
     if not m:
         return src
     try:
-        now = datetime.utcnow()
-        obs = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        ampm = (m.group(3) or "").upper()
+        tz = (m.group(4) or "Z").upper()
+        if ampm == "PM" and hour != 12:
+            hour += 12
+        if ampm == "AM" and hour == 12:
+            hour = 0
+        now = datetime.now()
+        if tz in ("Z", "UTC", "GMT"):
+            now = datetime.utcnow()
+        obs = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if obs > now:
             obs = obs - timedelta(days=1)
         mins = int((now - obs).total_seconds() // 60)
+        if mins < 0:
+            return src
         return f"{src} ({mins} min old)"
     except Exception:
         return src
@@ -2447,7 +2505,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.86 • Auto Log • Weather • Predict</p>
+    <p>v2.8.88 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3628,4 +3686,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.86")
+st.caption("Smart Slip v2.8.88")
