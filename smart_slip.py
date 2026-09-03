@@ -1117,19 +1117,18 @@ def render_track_picker(prefix: str):
             break
     rest = sorted(n for n in library if n not in recent)
     options = recent + rest
-    if last_track not in options and last_track:
-        last_track = options[0] if options else "Numidia Dragway"
-    idx = options.index(last_track) if last_track in options else 0
     picked = st.selectbox(
         "Drag Strip",
         options,
-        index=idx,
+        index=None,
+        placeholder="Tap to change track",
         format_func=lambda n: labels.get(n, n),
         key=f"{prefix}_track_select",
     )
-    pred_track = canonicalize_track(picked) or last_track
+    pred_track = canonicalize_track(picked) or (picked or "").strip() or last_track
     if pred_track:
         st.session_state.last_pred_track = pred_track
+        st.caption(f"Using **{pred_track}**")
     return pred_track
 
 def fetch_weather_noaa(lat, lon):
@@ -2431,7 +2430,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.83 • Auto Log • Weather • Predict</p>
+    <p>v2.8.84 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -3592,4 +3591,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.83")
+st.caption("Smart Slip v2.8.84")
