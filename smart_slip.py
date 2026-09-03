@@ -1018,51 +1018,134 @@ def canonicalize_track(name):
         return rec["name"]
     return (name or "").strip()
 
+def format_wx_line(wx):
+    if not wx:
+        return ""
+    parts = []
+    try:
+        if wx.get("temp_f") not in [None, ""]:
+            parts.append(f"{float(wx['temp_f']):.0f}°")
+    except Exception:
+        pass
+    try:
+        if wx.get("altimeter_inhg") not in [None, ""]:
+            parts.append(f"{float(wx['altimeter_inhg']):.2f}\"")
+    except Exception:
+        pass
+    try:
+        if wx.get("humidity_pct") not in [None, ""]:
+            parts.append(f"{float(wx['humidity_pct']):.0f}%")
+    except Exception:
+        pass
+    try:
+        if wx.get("density_altitude") not in [None, ""]:
+            parts.append(f"DA {int(float(wx['density_altitude']))}")
+    except Exception:
+        pass
+    try:
+        if wx.get("water_grains") not in [None, ""]:
+            parts.append(f"{float(wx['water_grains']):.0f} gr")
+    except Exception:
+        pass
+    src = str(wx.get("weather_source") or "").strip()
+    if src:
+        parts.append(src)
+    return " · ".join(parts)
+
+
+def last_weather_run(profile_id=None, vehicle=None):
+    runs = list(st.session_state.get("runs") or [])
+    pid = str(profile_id or "")
+    veh = str(vehicle or "").strip().lower()
+    hits = []
+    for r in runs:
+        same = False
+        if pid and str(r.get("profile_id") or "") == pid:
+            same = True
+        elif veh and str(r.get("vehicle") or "").strip().lower() == veh:
+            same = True
+        if not same:
+            continue
+        if r.get("density_altitude") in [None, ""] and r.get("water_grains") in [None, ""]:
+            continue
+        hits.append(r)
+    if not hits:
+        return None
+    hits.sort(key=lambda r: _parse_run_when(r.get("date"), r.get("time")) or datetime.min, reverse=True)
+    return hits[0]
+
+
+def wx_vs_last_line(wx, profile_id=None, vehicle=None):
+    last = last_weather_run(profile_id, vehicle)
+    if not last or not wx:
+        return ""
+    bits = []
+    try:
+        if wx.get("density_altitude") not in [None, ""] and last.get("density_altitude") not in [None, ""]:
+            d = float(wx["density_altitude"]) - float(last["density_altitude"])
+            bits.append(f"DA {d:+.0f} ft")
+    except Exception:
+        pass
+    try:
+        if wx.get("water_grains") not in [None, ""] and last.get("water_grains") not in [None, ""]:
+            d = float(wx["water_grains"]) - float(last["water_grains"])
+            bits.append(f"grains {d:+.0f}")
+    except Exception:
+        pass
+    if not bits:
+        return ""
+    when = " ".join(x for x in [str(last.get("date") or ""), str(last.get("time") or "")] if x).strip()
+    return f"vs last run{(' @ ' + when) if when else ''}: " + ", ".join(bits)
+
+
 def render_track_picker(prefix: str):
-    last_track = st.session_state.get("last_pred_track")
-    if last_track is None:
-        last_track = "Numidia Dragway"
-    nkey = f"{prefix}_track_n"
-    if nkey not in st.session_state:
-        st.session_state[nkey] = 0
+    last_track = st.session_state.get("last_pred_track") or "Numidia Dragway"
     labels = {}
-    names = []
+    library = []
     for name, city, region in TRACK_LIBRARY:
         labels[name] = f"{name} — {city}, {region}"
-        names.append(name)
-    for extra in list(TRACKS.keys()) + list(st.session_state.get("saved_tracks") or []):
-        if extra and extra not in labels and extra != "Other / Custom":
-            labels[extra] = extra
-            names.append(extra)
-    if last_track:
-        labels.setdefault(last_track, last_track)
-    options = sorted(set(names))
+        library.append(name)
+    recent = []
+    for name in [last_track]:
+        if name in labels and name not in recent:
+            recent.append(name)
+    for run in list(st.session_state.get("runs") or [])[:40]:
+        name = canonicalize_track(run.get("track"))
+        if name in labels and name not in recent:
+            recent.append(name)
+        if len(recent) >= 8:
+            break
+    rest = sorted(n for n in library if n not in recent)
+    options = recent + rest
+    q = st.text_input(
+        "Filter tracks",
+        key=f"{prefix}_track_filter",
+        placeholder="Type part of the strip or city",
+    )
+    if str(q or "").strip():
+        needle = str(q).strip().lower()
+        options = [
+            n for n in options
+            if needle in n.lower() or needle in labels.get(n, "").lower()
+        ]
+    if not options:
+        st.caption("No tracks match that filter.")
+        options = [last_track] if last_track in labels else (library[:1] or ["Numidia Dragway"])
+        if options[0] not in labels:
+            labels[options[0]] = options[0]
+    if last_track not in options:
+        last_track = options[0]
+    idx = options.index(last_track) if last_track in options else 0
     picked = st.selectbox(
         "Drag Strip",
         options,
-        index=None,
-        placeholder="Tap to change track",
+        index=idx,
         format_func=lambda n: labels.get(n, n),
-        key=f"{prefix}_track_select_{st.session_state[nkey]}",
+        key=f"{prefix}_track_select",
     )
-    pred_track = canonicalize_track(picked) or (picked or "").strip() or last_track
-    custom = st.text_input(
-        "Not in the library? Type the strip name",
-        key=f"{prefix}_track_custom",
-        placeholder="Use a library name so WeatherKit has a pin",
-    )
-    if str(custom or "").strip():
-        pred_track = str(custom).strip()
+    pred_track = canonicalize_track(picked) or last_track
     if pred_track:
-        saved = list(st.session_state.get("saved_tracks") or [])
-        if pred_track not in saved:
-            saved.append(pred_track)
-            st.session_state.saved_tracks = saved
-        if picked and pred_track != last_track:
-            st.session_state.last_pred_track = pred_track
-            st.rerun()
         st.session_state.last_pred_track = pred_track
-        st.caption(f"Using **{pred_track}**")
     return pred_track
 
 def fetch_weather_noaa(lat, lon):
@@ -2119,7 +2202,10 @@ def _auto_worker(job_id, prompt, img_bytes, ctx):
                 et_s = f"{float(new_run['et']):.3f}"
         except Exception:
             pass
-        write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=track or "")
+        wx_flag = "wx_on" if (wx and weather_looks_sane(wx)) else "wx_miss"
+        wx_line = format_wx_line(wx) if wx_flag == "wx_on" else ""
+        extra = "|".join([p for p in [track or "", wx_flag, wx_line] if p is not None])
+        write_job(job_id, ctx.get("user"), "auto", "done", result=et_s or "saved", extra=extra)
         PRED_PROMPTS.setdefault(job_id, {})["run"] = new_run
     except Exception as e:
         write_job(job_id, ctx.get("user"), "auto", "error", error=str(e))
@@ -2349,7 +2435,7 @@ st.markdown(f"""
   <img src="{ICON_URL}" alt="Smart Slip">
   <div>
     <h1>Smart Slip</h1>
-    <p>v2.8.78 • Auto Log • Weather • Predict</p>
+    <p>v2.8.81 • Auto Log • Weather • Predict</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -2707,12 +2793,33 @@ notes=
                 st.session_state.auto_reloaded = str(auto_job.get("id"))
             et_s = auto_job.get("result") or ""
             extra = auto_job.get("extra") or ""
+            extra_parts = [p for p in str(extra).split("|") if p != ""]
+            track_line = extra_parts[0] if extra_parts and extra_parts[0] not in ("wx_on", "wx_miss") else ""
+            wx_flag = ""
+            wx_line = ""
+            for p in extra_parts[1:] if track_line else extra_parts:
+                if p in ("wx_on", "wx_miss") and not wx_flag:
+                    wx_flag = p
+                elif p not in ("wx_on", "wx_miss"):
+                    wx_line = p
+            saved = (PRED_PROMPTS.get(str(auto_job.get("id"))) or {}).get("run")
+            if saved and not wx_flag:
+                if saved.get("temp_f") not in [None, ""] and saved.get("altimeter_inhg") not in [None, ""]:
+                    wx_flag = "wx_on"
+                    wx_line = wx_line or format_wx_line(saved)
+                else:
+                    wx_flag = "wx_miss"
             et_line = f"ET {et_s}s" if et_s and et_s not in ["saved", "SAVED"] else "Slip read"
-            track_line = extra or ""
+            if wx_flag == "wx_on":
+                wx_status = "Weather on" + (f" · {wx_line}" if wx_line else "")
+            elif wx_flag == "wx_miss":
+                wx_status = "Weather missed — open Manual Log to pull"
+            else:
+                wx_status = "Entered in Log Book"
             st.markdown(
                 f"<div class='ss-ok'>READING COMPLETE<br><span>{et_line}"
                 f"{(' @ ' + track_line) if track_line else ''}</span>"
-                f"<span>Entered in Log Book</span></div>",
+                f"<span>{wx_status}</span></div>",
                 unsafe_allow_html=True,
             )
         elif stt == "error":
@@ -2737,11 +2844,24 @@ if st.session_state.nav == "Manual Log":
     track = render_track_picker("manual")
     rec = find_track(track)
     if rec and rec.get("lat") not in [None, ""]:
-        st.caption("WeatherKit will use the library pin at the tree.")
+        st.caption("Weather uses the library pin at the tree.")
     else:
-        st.caption("Pick a library strip. Unknown names need a pin before WeatherKit can run.")
-    if st.button("Pull WeatherKit", key="manual_pull_wx"):
-        wx = fetch_weather_for_track(track)
+        st.caption("This strip has no pin yet — weather may use the city location.")
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        run_date = st.date_input("Run date", value=datetime.now().date(), key="manual_run_date")
+    with dc2:
+        run_time = st.time_input("Run time", value=datetime.now().time().replace(second=0, microsecond=0), key="manual_run_time")
+    run_when = None
+    try:
+        run_when = datetime.combine(run_date, run_time)
+        if abs((run_when - datetime.now()).total_seconds()) < 600:
+            run_when = None
+    except Exception:
+        run_when = None
+    pull_label = "Pull current weather at selected track" if run_when is None else "Pull weather for this date/time"
+    if st.button(pull_label, key="manual_pull_wx"):
+        wx = fetch_weather_for_track(track, when=run_when)
         if wx and weather_looks_sane(wx):
             if wx.get("temp_f") not in [None, ""]:
                 st.session_state.manual_temp = float(wx["temp_f"])
@@ -2757,17 +2877,24 @@ if st.session_state.nav == "Manual Log":
                 st.session_state.manual_air = float(wx["air_density_pct"])
             if wx.get("vapor_pressure") not in [None, ""]:
                 st.session_state.manual_vapor = float(wx["vapor_pressure"])
-            st.session_state.manual_wx_note = wx.get("weather_source") or "WeatherKit"
+            st.session_state.manual_wx_line = format_wx_line(wx)
+            st.session_state.manual_wx_vs = wx_vs_last_line(wx, selected_profile_id, vehicle_name)
+            st.session_state.manual_wx_note = ""
             st.rerun()
         else:
             err = weatherkit_last_error() or "WeatherKit returned nothing for this pin."
             st.session_state.manual_wx_note = err
+            st.session_state.manual_wx_line = ""
+            st.session_state.manual_wx_vs = ""
     note = st.session_state.get("manual_wx_note") or ""
+    line = st.session_state.get("manual_wx_line") or ""
+    vs = st.session_state.get("manual_wx_vs") or ""
     if note:
-        if note.lower().startswith("weatherkit") and "°" not in note and "tree pin" not in note.lower() and "[gps]" not in note.lower():
-            st.error(note)
-        else:
-            st.caption(note)
+        st.error(note)
+    if line:
+        st.markdown(f"**{line}**")
+    if vs:
+        st.caption(vs)
     st.markdown("**Weather**")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -2810,6 +2937,8 @@ if st.session_state.nav == "Manual Log":
         payload = {
             "profile_id": str(selected_profile_id or ""),
             "track": track,
+            "date": str(run_date),
+            "time": str(run_time),
             "dial": dial, "reaction_time": rt, "et": et,
             "sixty_ft": sixty, "three_thirty_ft": three_thirty,
             "eighth_et": eighth, "eighth_mph": eighth_mph,
@@ -2825,8 +2954,8 @@ if st.session_state.nav == "Manual Log":
             new_run = {
                 "id": str(datetime.now().timestamp()),
                 "user": st.session_state.get("user_email") or st.session_state.user_name,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "time": datetime.now().strftime("%H:%M"),
+                "date": run_date.strftime("%Y-%m-%d") if run_date else datetime.now().strftime("%Y-%m-%d"),
+                "time": run_time.strftime("%H:%M") if run_time else datetime.now().strftime("%H:%M"),
                 "track": track,
                 "vehicle": vehicle_name,
                 "profile_id": selected_profile_id,
@@ -3459,4 +3588,4 @@ SMTP_FROM = "you@gmail.com"
                 st.error(f"Could not send report: {msg}")
 
 st.divider()
-st.caption("Smart Slip v2.8.78")
+st.caption("Smart Slip v2.8.81")
